@@ -1,0 +1,6 @@
+﻿fastapi>=0.110
+uvicorn[standard]>=0.29
+httpx>=0.27
+# 可选（升级路径）：
+# faster-whisper   # 本地流式 ASR
+# piper-tts        # 本地音素级 TTS

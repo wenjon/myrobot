@@ -1,0 +1,54 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>机器人头部对话 Demo · 小柚</title>
+<script src="./src/three.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Microsoft YaHei", system-ui, sans-serif; background: #0b0e17; color: #e6e6e6; height: 100vh; display: flex; }
+  #left { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  #face { width: 460px; height: 460px; max-width: 90vw; max-height: 60vh; }
+  #right { width: 380px; max-width: 42vw; display: flex; flex-direction: column; border-left: 1px solid #1c2233; padding: 16px; gap: 12px; }
+  h1 { font-size: 16px; margin: 0 0 4px; font-weight: 600; }
+  .sub { font-size: 12px; color: #7a8296; margin-bottom: 8px; }
+  #log { flex: 1; overflow-y: auto; background: #10141f; border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+  .msg { padding: 8px 10px; border-radius: 8px; font-size: 14px; line-height: 1.5; max-width: 90%; }
+  .msg.user { align-self: flex-end; background: #2a3350; }
+  .msg.bot { align-self: flex-start; background: #1a2030; }
+  .row { display: flex; gap: 8px; }
+  textarea { flex: 1; resize: none; height: 56px; background: #10141f; border: 1px solid #1c2233; color: #e6e6e6; border-radius: 8px; padding: 8px; font-family: inherit; font-size: 14px; }
+  button { background: #3a4a7a; color: #fff; border: none; border-radius: 8px; padding: 0 14px; cursor: pointer; font-size: 14px; }
+  button:hover { background: #4a5c96; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  #interrupt { background: #7a3a3a; }
+  #mic { background: #3a7a5a; }
+  #status { font-size: 12px; }
+  #status.ok { color: #6fcf97; }
+  #status.bad { color: #eb5757; }
+</style>
+</head>
+<body>
+  <div id="left">
+    <canvas id="face"></canvas>
+    <div class="sub" style="margin-top:12px;">全链路流式 Demo：Ollama → 中央调度 → Web Speech TTS → 2D 口型/表情</div>
+  </div>
+  <div id="right">
+    <div>
+      <h1>机器人头部对话 · 小柚</h1>
+      <div class="sub">状态：<span id="status" class="bad">连接中…</span></div>
+    </div>
+    <div id="log"></div>
+    <div class="row">
+      <textarea id="input" placeholder="输入中文对话，回车发送…"></textarea>
+    </div>
+    <div class="row">
+      <button id="send">发送</button>
+      <button id="mic">🎤 语音</button>
+      <button id="interrupt">打断</button>
+    </div>
+  </div>
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
