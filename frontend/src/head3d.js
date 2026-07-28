@@ -44,12 +44,24 @@ export async function createHead3D(canvas, avatarUrl) {
   });
   scene.add(root);
 
-  // 把头对准相机高度：找 Head 骨骼/网格中心
-  const box = new THREE.Box3().setFromObject(root);
-  const center = box.getCenter(new THREE.Vector3());
-  const headY = box.max.y - (box.max.y - center.y) * 0.35;
-  cam.position.set(0, headY, 0.62);
-  cam.lookAt(0, headY, 0);
+  // 相机对准头部：优先用 Head 骨骼世界坐标，取不到再退化到包围盒顶部
+  root.updateWorldMatrix(true, true);
+  let headBone = null;
+  root.traverse((o) => { if (o.isBone && o.name === 'Head') headBone = o; });
+  const headPos = new THREE.Vector3();
+  if (headBone) {
+    headBone.getWorldPosition(headPos);
+    headPos.y += 0.08; // 骨骼在下颌附近，略上移到脸中心
+  } else {
+    const box = new THREE.Box3().setFromObject(root);
+    box.getCenter(headPos);
+    headPos.y = box.max.y - 0.15;
+  }
+  // 头部大约 0.20~0.24m，用一点余量取景（含头发/下巴）
+  const dist = 0.62;
+  cam.fov = 24; cam.updateProjectionMatrix();
+  cam.position.set(headPos.x, headPos.y, headPos.z + dist);
+  cam.lookAt(headPos.x, headPos.y, headPos.z);
 
   // ---- blendshape 目标值与当前值（做平滑插值）----
   const target = {};   // name -> 0..1 目标
@@ -141,4 +153,6 @@ export async function createHead3D(canvas, avatarUrl) {
 
   return { setViseme, mouthClosed, setExpression, triggerNod, triggerShake };
 }
+
+
 
