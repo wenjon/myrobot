@@ -1,16 +1,25 @@
-﻿import { createHead } from './head.js';
+﻿import { createHead3D } from './head3d.js';
 import { connect } from './ws.js';
 import { speak, cancel } from './tts.js';
-import { shapeForText, CLOSED } from './viseme.js';
+import { visemeForChar, CLOSED } from './viseme.js';
 
 const canvas = document.getElementById('face');
-const head = createHead(canvas);
-
 const logEl = document.getElementById('log');
 const statusEl = document.getElementById('status');
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
 const interruptBtn = document.getElementById('interrupt');
+const micBtn = document.getElementById('mic');
+
+let head = null;
+statusEl.textContent = '加载数字人…';
+try {
+  head = await createHead3D(canvas, './src/avatar.glb');
+  statusEl.textContent = '连接中…';
+} catch (e) {
+  statusEl.textContent = '数字人加载失败: ' + e.message;
+  console.error(e);
+}
 
 function log(role, text) {
   const div = document.createElement('div');
@@ -20,30 +29,35 @@ function log(role, text) {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
-// 口型驱动：每个字 boundary 触发一次张口，然后自动回落
+// 口型驱动：每个字 boundary 触发一次 viseme，然后回落到闭口
 let mouthTimer = null;
 function driveMouth(char) {
-  if (char === '') { head.setMouth(CLOSED.open, CLOSED.wide); return; }
-  const s = shapeForText(char);
-  head.setMouth(s.open, s.wide);
+  if (!head) return;
+  if (char === '') { head.mouthClosed(); return; }
+  const v = visemeForChar(char);
+  head.setViseme(v, 1.0);
   clearTimeout(mouthTimer);
-  mouthTimer = setTimeout(() => head.setMouth(CLOSED.open, CLOSED.wide), 120);
+  mouthTimer = setTimeout(() => head.mouthClosed(), 130);
 }
 
-const EMOTION_MAP = { '开心': '开心', '疑惑': '疑惑', '惊讶': '惊讶', '平静': '平静' };
+const EMOTION_SET = new Set(['平静', '开心', '悲伤', '生气', '惊讶', '疑惑']);
 
 const ws = connect(`ws://${location.host}/ws`, {
-  onOpen: () => { statusEl.textContent = '已连接'; statusEl.className = 'ok'; },
+  onOpen: () => { if (head) { statusEl.textContent = '已连接'; statusEl.className = 'ok'; } },
   onClose: () => { statusEl.textContent = '断开，重连中…'; statusEl.className = 'bad'; },
   onMessage: (msg) => {
     if (msg.type === 'sentence') {
       log('bot', msg.text);
-      speak(msg.text, msg.seq,
-        (b) => driveMouth(b.char),
-        () => {});
+      speak(msg.text, msg.seq, (b) => driveMouth(b.char), () => {});
     } else if (msg.type === 'action') {
-      if (msg.action === '表情') head.setExpression(EMOTION_MAP[msg.value] || '平静');
-      else if (msg.action === '动作') { if (msg.value.includes('点头')) head.triggerNod(); }
+      if (!head) return;
+      if (msg.action === '表情') {
+        const e = EMOTION_SET.has(msg.value) ? msg.value : '平静';
+        head.setExpression(e);
+      } else if (msg.action === '动作') {
+        if (msg.value.includes('点头')) head.triggerNod();
+        else if (msg.value.includes('摇头')) head.triggerShake();
+      }
     } else if (msg.type === 'llm_done') {
       statusEl.textContent = '已连接';
     } else if (msg.type === 'error') {
@@ -66,8 +80,7 @@ sendBtn.onclick = sendMessage;
 input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
 interruptBtn.onclick = () => { cancel(); ws.send({ type: 'interrupt' }); statusEl.textContent = '已打断'; };
 
-// 语音输入（可选，Web Speech Recognition）
-const micBtn = document.getElementById('mic');
+// 语音识别（可选）
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 if (SR) {
   const rec = new SR();
@@ -85,9 +98,4 @@ if (SR) {
   rec.onend = () => { if (input.value.trim()) sendMessage(); else statusEl.textContent = '已连接'; };
 } else {
   micBtn.disabled = true; micBtn.title = '当前浏览器不支持语音识别';
-}
-
-// 预热语音列表
-if (speechSynthesis.getVoices().length === 0) {
-  speechSynthesis.onvoiceschanged = () => {};
 }

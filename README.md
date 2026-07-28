@@ -36,7 +36,7 @@ python server.py
   - `pipeline/llm_client.py` — Ollama 流式客户端
   - `pipeline/text_router.py` — 文本解析中央调度（清洗/分句/动作分流）
   - `server.py` — WS 编排 + 静态托管
-- `frontend/` — Three.js 2D 虚拟头 + Web Speech TTS
+- `frontend/` — Three.js 3D 数字人（Ready Player Me 风格头像 + ARKit blendshape/Oculus viseme）
   - `src/head.js` `src/tts.js` `src/viseme.js` `src/ws.js` `src/main.js`
 
 ## 与原方案的对应 & 简化
@@ -53,3 +53,15 @@ python server.py
 - TTS 用浏览器 Web Speech（本机 edge-tts/SAPI 在此环境不稳定）；口型对齐为 demo 级。
 - 中文口型用拼音粗分/字符兜底，非真音素级。
 - 首次回答含 Ollama 模型加载耗时，二次更快。
+
+
+## 数字人（3D 版）
+- 前端已从 2D 圆脸升级为 **3D 数字人**（`frontend/src/avatar.glb`，含 15 个 Oculus viseme + ARKit 表情 blendshape）。
+- 口型：TTS 字级时间戳 → 拼音韵母 → viseme（`frontend/src/viseme.js`）→ blendshape 实时驱动（`frontend/src/head3d.js`）。
+- 表情：LLM 输出 `[表情:开心/悲伤/生气/惊讶/疑惑/平静]` → blendshape 组合；`[动作:点头/摇头]` → 头部旋转。
+- 全部 WebGL 渲染，AMD/集显均可，无需 CUDA/GPU 推理，保留全链路流式与打断。
+
+### 为什么没用 Wav2Lip/SadTalker/MuseTalk
+- 它们依赖 NVIDIA CUDA；AMD+Windows 无法使用（ROCm 不支持 Windows，DirectML 未适配这些仓库）。
+- 且它们是「整段音频→出 mp4」的离线批处理，非流式，与本方案的低延迟/可打断目标冲突。
+- 3D 数字人方案在无 GPU 推理下即可实时驱动口型与表情，是更契合的替代。
