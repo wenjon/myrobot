@@ -2,7 +2,7 @@
 import os
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:12b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:12b")
 
 # 智能分句参数
 SENTENCE_MIN_LEN = int(os.getenv("SENTENCE_MIN_LEN", "8"))
@@ -25,4 +25,5 @@ SYSTEM_PROMPT = os.getenv(
 
 HOST = os.getenv("HOST", "127.0.0.1")
 PORT = int(os.getenv("PORT", "8000"))
+
 
