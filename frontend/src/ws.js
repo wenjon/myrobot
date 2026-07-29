@@ -32,7 +32,12 @@ export function connect(url, handlers) {
 
   return {
     url,
-    send(msg) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); },
+    send(msg) {
+      if (ws && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify(msg)); return true; }
+      console.warn('[WS] 发送失败：连接未就绪，消息已丢弃', msg);
+      return false;
+    },
     close() { if (reconnectTimer) clearTimeout(reconnectTimer); if (ws) ws.close(); }
   };
 }
+

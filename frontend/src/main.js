@@ -15,15 +15,13 @@ const newBtn = document.getElementById('newchat');
 let sessionId = localStorage.getItem('robot_session') || '';
 const micBtn = document.getElementById('mic');
 
+// 数字人在后台异步加载，不阻塞 WebSocket 连接与聊天。
+// （手机上 glb 较大/WebGL 慢时，之前的 await 会卡住后续连接代码，导致发不出消息。）
 let head = null;
-statusEl.textContent = '加载数字人…';
-try {
-  head = await createHead3D(canvas, './src/avatar.glb');
-  statusEl.textContent = '连接中…';
-} catch (e) {
-  statusEl.textContent = '数字人加载失败: ' + e.message;
-  console.error(e);
-}
+statusEl.textContent = '连接中…';
+createHead3D(canvas, './src/avatar.glb')
+  .then((h) => { head = h; console.log('[Head] 数字人加载完成'); })
+  .catch((e) => { console.error('[Head] 数字人加载失败（不影响对话）:', e); });
 
 function log(role, text) {
   const div = document.createElement('div');
@@ -52,7 +50,7 @@ const WS_PROTO = location.protocol === 'https:' ? 'wss:' : 'ws:';
 const WS_URL = `${WS_PROTO}//${location.host}/ws`;
 
 const ws = connect(WS_URL, {
-  onOpen: () => { if (head) { statusEl.textContent = '已连接'; statusEl.className = 'ok'; } ws.send({ type: 'hello', session: sessionId }); },
+  onOpen: () => { statusEl.textContent = '已连接'; statusEl.className = 'ok'; ws.send({ type: 'hello', session: sessionId }); },
   onClose: () => { statusEl.textContent = '断开，重连中…'; statusEl.className = 'bad'; },
   onMessage: (msg) => {
     if (msg.type === 'sentence') {
@@ -82,9 +80,10 @@ const ws = connect(WS_URL, {
 function sendMessage() {
   const text = input.value.trim();
   if (!text) return;
-  log('user', text);
   cancel();
-  ws.send({ type: 'user_message', text, session: sessionId });
+  const ok = ws.send({ type: 'user_message', text, session: sessionId });
+  if (!ok) { statusEl.textContent = '未连接，无法发送（请稍候重连）'; statusEl.className = 'bad'; return; }
+  log('user', text);
   input.value = '';
   statusEl.textContent = '思考中…';
 }
@@ -113,6 +112,8 @@ if (SR) {
 } else {
   micBtn.disabled = true; micBtn.title = '当前浏览器不支持语音识别';
 }
+
+
 
 
 
