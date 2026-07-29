@@ -46,7 +46,19 @@ function driveMouth(char) {
 
 const EMOTION_SET = new Set(['平静', '开心', '悲伤', '生气', '惊讶', '疑惑']);
 
-const ws = connect(`ws://${location.host}/ws`, {
+// WebSocket 地址选择：
+// 1) 若通过 URL 传入 ?ws=wss://xxx/ws 则用它（方便临时指定 Cloudflare 隧道等）；
+// 2) 否则按当前页面协议自动选择 ws/wss，指向同源 /ws；
+//    - http://  页面  -> ws://
+//    - https:// 页面（含 trycloudflare.com 隧道）-> wss://
+function resolveWsUrl() {
+  const override = new URLSearchParams(location.search).get('ws');
+  if (override) return override;
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${proto}//${location.host}/ws`;
+}
+
+const ws = connect(resolveWsUrl(), {
   onOpen: () => { if (head) { statusEl.textContent = '已连接'; statusEl.className = 'ok'; } ws.send({ type: 'hello', session: sessionId }); },
   onClose: () => { statusEl.textContent = '断开，重连中…'; statusEl.className = 'bad'; },
   onMessage: (msg) => {
@@ -108,4 +120,5 @@ if (SR) {
 } else {
   micBtn.disabled = true; micBtn.title = '当前浏览器不支持语音识别';
 }
+
 
