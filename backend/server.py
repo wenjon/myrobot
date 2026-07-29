@@ -291,6 +291,18 @@ async def ws_endpoint(ws: WebSocket):
                 worker_task.cancel()
 
 
+# 静态资源禁用缓存：避免手机/浏览器一直用旧版前端 JS 导致行为异常。
+@app.middleware("http")
+async def no_cache_static(request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith("/app") and (path.endswith(".js") or path.endswith(".html") or path == "/app" or path.endswith("/")):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 # 挂载前端静态资源（放在路由定义之后，避免覆盖 API 路由）
 if FRONTEND_DIR.exists():
     app.mount("/app", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="app")
@@ -301,4 +313,5 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("server:app", host=HOST, port=PORT, reload=False)
+
 
