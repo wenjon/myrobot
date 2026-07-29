@@ -35,3 +35,23 @@ async def stream_chat(
                 chunk = data.get("message", {}).get("content", "")
                 if chunk:
                     yield chunk
+
+
+async def chat_once(
+    messages: List[Dict[str, str]],
+    model: str = OLLAMA_MODEL,
+    url: str = OLLAMA_URL,
+) -> str:
+    """非流式一次性对话，用于摘要等内部任务。"""
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "options": {"temperature": 0.3},
+    }
+    timeout = httpx.Timeout(120.0, connect=10.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(f"{url}/api/chat", json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("message", {}).get("content", "")

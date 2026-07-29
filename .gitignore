@@ -4,3 +4,5 @@
 *.wav
 .venv/
 node_modules/
+backend/logs/
+context.log

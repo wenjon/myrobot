@@ -9,6 +9,10 @@ const statusEl = document.getElementById('status');
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
 const interruptBtn = document.getElementById('interrupt');
+const newBtn = document.getElementById('newchat');
+
+// 会话 ID 持久化：刷新/重连不丢记忆
+let sessionId = localStorage.getItem('robot_session') || '';
 const micBtn = document.getElementById('mic');
 
 let head = null;
@@ -43,7 +47,7 @@ function driveMouth(char) {
 const EMOTION_SET = new Set(['平静', '开心', '悲伤', '生气', '惊讶', '疑惑']);
 
 const ws = connect(`ws://${location.host}/ws`, {
-  onOpen: () => { if (head) { statusEl.textContent = '已连接'; statusEl.className = 'ok'; } },
+  onOpen: () => { if (head) { statusEl.textContent = '已连接'; statusEl.className = 'ok'; } ws.send({ type: 'hello', session: sessionId }); },
   onClose: () => { statusEl.textContent = '断开，重连中…'; statusEl.className = 'bad'; },
   onMessage: (msg) => {
     if (msg.type === 'sentence') {
@@ -62,6 +66,10 @@ const ws = connect(`ws://${location.host}/ws`, {
       statusEl.textContent = '已连接';
     } else if (msg.type === 'error') {
       log('bot', '[出错] ' + msg.message);
+    } else if (msg.type === 'session') {
+      sessionId = msg.session; localStorage.setItem('robot_session', sessionId);
+    } else if (msg.type === 'cleared') {
+      logEl.innerHTML = ''; statusEl.textContent = '已连接（新对话）';
     }
   }
 });
@@ -71,7 +79,7 @@ function sendMessage() {
   if (!text) return;
   log('user', text);
   cancel();
-  ws.send({ type: 'user_message', text });
+  ws.send({ type: 'user_message', text, session: sessionId });
   input.value = '';
   statusEl.textContent = '思考中…';
 }
@@ -79,6 +87,7 @@ function sendMessage() {
 sendBtn.onclick = sendMessage;
 input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
 interruptBtn.onclick = () => { cancel(); ws.send({ type: 'interrupt' }); statusEl.textContent = '已打断'; };
+if (newBtn) newBtn.onclick = () => { cancel(); ws.send({ type: 'clear' }); };
 
 // 语音识别（可选）
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -99,3 +108,4 @@ if (SR) {
 } else {
   micBtn.disabled = true; micBtn.title = '当前浏览器不支持语音识别';
 }
+

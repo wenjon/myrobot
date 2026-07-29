@@ -27,3 +27,24 @@ HOST = os.getenv("HOST", "127.0.0.1")
 PORT = int(os.getenv("PORT", "8000"))
 
 
+
+# ---- 上下文管理 ----
+# 滑动窗口保留最近 N 轮（1 轮 = user + assistant）
+MAX_TURNS = int(os.getenv("MAX_TURNS", "10"))
+# token 预算（近似，用字符数估算），超过则触发裁剪/摘要
+MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "4000"))
+# 是否启用摘要式长期记忆
+ENABLE_SUMMARY = os.getenv("ENABLE_SUMMARY", "1") == "1"
+# 摘要触发：被裁掉的历史累计超过该字符数就压缩成摘要
+SUMMARY_TRIGGER_CHARS = int(os.getenv("SUMMARY_TRIGGER_CHARS", "1200"))
+# 会话空闲多久后回收（秒）
+SESSION_TTL = int(os.getenv("SESSION_TTL", "3600"))
+
+# ---- 上下文日志 ----
+# 是否在控制台/文件打印每轮上下文与输出
+LOG_CONTEXT = os.getenv("LOG_CONTEXT", "1") == "1"
+# 上下文日志文件路径（设为空字符串则不写文件，仅控制台）
+CONTEXT_LOG_FILE = os.getenv(
+    "CONTEXT_LOG_FILE",
+    os.path.join(os.path.dirname(__file__), "logs", "context.log"),
+)
