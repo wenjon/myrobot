@@ -22,7 +22,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 
-from config import HOST, PORT, OLLAMA_MODEL, LOG_CONTEXT, CONTEXT_LOG_FILE
+from config import HOST, PORT, LLM_PROVIDER, OLLAMA_MODEL, ARK_MODEL, LOG_CONTEXT, CONTEXT_LOG_FILE
 from pipeline.llm_client import stream_chat, chat_once
 from pipeline.text_router import route
 from pipeline.conversation import ConversationManager
@@ -100,7 +100,8 @@ async def index():
 @app.get("/api/health")
 async def health():
     """健康检查：确认服务在线并回报当前使用的模型名。"""
-    return {"ok": True, "model": OLLAMA_MODEL}
+    model = ARK_MODEL if LLM_PROVIDER == "ark" else OLLAMA_MODEL
+    return {"ok": True, "provider": LLM_PROVIDER, "model": model}
 
 
 # =====================================================================
@@ -300,3 +301,4 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("server:app", host=HOST, port=PORT, reload=False)
+

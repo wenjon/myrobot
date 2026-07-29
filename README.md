@@ -21,6 +21,8 @@ python server.py
 ```
 
 可用环境变量覆盖配置（见 `backend/config.py`）：
+- `LLM_PROVIDER`（`ark` 火山引擎 / `ollama` 本地，默认 `ark`）
+- Ark：`ARK_BASE_URL`、`ARK_API_KEY`、`ARK_MODEL`（默认 `ark-code-latest`）
 - `OLLAMA_MODEL`（默认 `gemma3:12b`）
 - `OLLAMA_URL`、`PORT`、`SYSTEM_PROMPT`、`SENTENCE_MIN_LEN`、`SENTENCE_MAX_LEN`
 
@@ -65,3 +67,4 @@ python server.py
 - 它们依赖 NVIDIA CUDA；AMD+Windows 无法使用（ROCm 不支持 Windows，DirectML 未适配这些仓库）。
 - 且它们是「整段音频→出 mp4」的离线批处理，非流式，与本方案的低延迟/可打断目标冲突。
 - 3D 数字人方案在无 GPU 推理下即可实时驱动口型与表情，是更契合的替代。
+

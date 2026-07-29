@@ -1,8 +1,18 @@
 ﻿"""Demo 配置。可通过环境变量覆盖。"""
 import os
 
+# ---- LLM 供应商切换 ----
+# provider = "ark"（火山引擎 Ark，OpenAI 兼容）或 "ollama"（本地）
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ark")
+
+# 本地 Ollama
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:12b")
+
+# 火山引擎 Ark（OpenAI 兼容 /chat/completions）
+ARK_BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/coding/v3")
+ARK_API_KEY = os.getenv("ARK_API_KEY", "REDACTED_ARK_API_KEY")
+ARK_MODEL = os.getenv("ARK_MODEL", "ark-code-latest")
 
 # 智能分句参数
 SENTENCE_MIN_LEN = int(os.getenv("SENTENCE_MIN_LEN", "8"))
@@ -48,3 +58,4 @@ CONTEXT_LOG_FILE = os.getenv(
     "CONTEXT_LOG_FILE",
     os.path.join(os.path.dirname(__file__), "logs", "context.log"),
 )
+
