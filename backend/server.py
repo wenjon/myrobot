@@ -57,11 +57,14 @@ def _emit(line: str):
         _log_fh.flush()  # 立即落盘，保证前台 tail 时能实时看到
 
 
-def _log_context(session, messages, user_text):
-    """打印本轮「真实发送给 LLM 的完整上下文」，用于核对多轮记忆是否正确。"""
+def _log_context(session, messages, user_text, who=""):
+    """打印本轮「真实发送给 LLM 的完整上下文」，用于核对多轮记忆是否正确。
+
+    who: 连接标识前缀（如 "#a1b2c3 127.0.0.1:54321"），用于区分是哪个客户端。
+    """
     ts = datetime.now().strftime("%H:%M:%S")
     lines = ["\n" + "=" * 70,
-             f"[{ts}][会话 {session.id[:8]}] 用户输入: {user_text}",
+             f"[{ts}][{who}][会话 {session.id[:8]}] 用户输入: {user_text}",
              f"[发送给 LLM 的上下文 · 共 {len(messages)} 条 · "
              f"约 {sum(len(m['content']) for m in messages)} 字]"]
     # 逐条列出 system / 历史 user / 历史 assistant / 本轮 user
@@ -78,10 +81,10 @@ def _log_context(session, messages, user_text):
     _emit("\n".join(lines))
 
 
-def _log_output(session, assistant_raw, note=""):
-    """打印本轮模型输出（note 用于标注「被打断」等状态）。"""
+def _log_output(session, assistant_raw, note="", who=""):
+    """打印本轮模型输出（note 用于标注「被打断」等状态，who 为连接标识前缀）。"""
     ts = datetime.now().strftime("%H:%M:%S")
-    _emit(f"[{ts}][会话 {session.id[:8]}] 模型输出{note}: {assistant_raw.strip()}\n" + "=" * 70)
+    _emit(f"[{ts}][{who}][会话 {session.id[:8]}] 模型输出{note}: {assistant_raw.strip()}\n" + "=" * 70)
 
 
 # 前端静态资源目录（与 backend 同级的 frontend/）
@@ -107,7 +110,7 @@ async def health():
 # =====================================================================
 # 单轮对话核心：LLM 流式 → 中央调度 → WS 推送，并做上下文安全提交
 # =====================================================================
-async def _run_dialog(ws: WebSocket, session, text: str, cancel: asyncio.Event):
+async def _run_dialog(ws: WebSocket, session, text: str, cancel: asyncio.Event, who: str = ""):
     """处理一轮对话。
 
     参数:
@@ -124,7 +127,7 @@ async def _run_dialog(ws: WebSocket, session, text: str, cancel: asyncio.Event):
     # 1) 开启新一轮，并组装本轮真正要发给 LLM 的消息（system + 窗口历史 + 本轮 user）
     session.begin_turn(text)
     messages = session.build_messages(text)
-    _log_context(session, messages, text)
+    _log_context(session, messages, text, who)
 
     assistant_text = []   # 收集模型完整输出（含动作标记，用于日志/入库）
     produced = False      # 是否已向前端产出过至少一句（用于打断时判断）
@@ -159,7 +162,7 @@ async def _run_dialog(ws: WebSocket, session, text: str, cancel: asyncio.Event):
     except Exception as e:  # noqa: BLE001
         # LLM/网络等异常：回滚本轮，并把错误告知前端
         session.rollback_turn()
-        _log_output(session, f"[出错] {e}")
+        _log_output(session, f"[出错] {e}", who=who)
         try:
             await ws.send_text(json.dumps({"type": "error", "message": str(e)}, ensure_ascii=False))
         except Exception:
@@ -171,16 +174,16 @@ async def _run_dialog(ws: WebSocket, session, text: str, cancel: asyncio.Event):
         partial = "".join(assistant_text).strip()
         if produced and partial:
             # 已经说了半句：记入历史并标注，保持上下文连贯
-            _log_output(session, partial, "（被打断）")
+            _log_output(session, partial, "（被打断）", who=who)
             session.commit_turn(partial + "（被打断）")
         else:
             # 还没开口就被打断：直接回滚，不留半截记录
             session.rollback_turn()
-            _log_output(session, "(打断，无产出，已回滚)")
+            _log_output(session, "(打断，无产出，已回滚)", who=who)
         return
 
     # 4) 正常结束：写入历史 + 通知前端本轮结束
-    _log_output(session, "".join(assistant_text))
+    _log_output(session, "".join(assistant_text), who=who)
     session.commit_turn("".join(assistant_text))
     await ws.send_text(json.dumps({"type": "llm_done"}, ensure_ascii=False))
 
@@ -221,7 +224,8 @@ async def ws_endpoint(ws: WebSocket):
             c = asyncio.Event()
             worker_current["cancel"] = c  # 暴露给外层，供 interrupt/clear 触发
             try:
-                await _run_dialog(ws, session, text, c)
+                who = f"#{conn_id} {peer}"
+                await _run_dialog(ws, session, text, c, who)
             except Exception:
                 session.rollback_turn()
             finally:
