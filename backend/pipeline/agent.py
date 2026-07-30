@@ -21,7 +21,7 @@ import json
 from typing import AsyncIterator, Callable, Dict, List, Optional, Awaitable
 
 from config import ENABLE_TOOLS, TOOL_MAX_ROUNDS, TOOL_MAX_PERMISSION
-from pipeline.llm_client import stream_chat, chat_with_tools
+from pipeline.llm_client import stream_chat, chat_with_tools, chat_once
 from tools import REGISTRY, RESOURCES
 from tools.base import ToolContext, Permission
 
@@ -111,5 +111,23 @@ async def agent_stream(
     # ---- 阶段二：基于工具结果流式生成最终答案 ----
     if cancel is not None and cancel.is_set():
         return
+    # 明确要求模型停止继续调用工具、立即用中文作答，
+    # 避免它在流式阶段仍想搜索而只吐空 content。
+    working.append({
+        "role": "user",
+        "content": "请不要再搜索了。基于以上已获得的信息，现在直接用简短口语化中文回答我最初的问题。",
+    })
+    produced_any = False
     async for tok in stream_chat(working):
+        if tok:
+            produced_any = True
         yield tok
+    # 流式没吐出任何内容时，用非流式再要一次，保证不空场。
+    if not produced_any:
+        if log_fn:
+            log_fn("[agent] 流式最终答为空，回退非流式再取一次")
+        try:
+            final = await chat_once(working)
+        except Exception:
+            final = ""
+        yield final or "抱歉，我没能整理出完整答案，可以换个说法再问我一次吗？"
