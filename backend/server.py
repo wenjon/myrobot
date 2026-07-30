@@ -15,17 +15,21 @@ import asyncio
 import json
 import os
 import uuid
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, PlainTextResponse, Response
 
-from config import HOST, PORT, LLM_PROVIDER, OLLAMA_MODEL, ARK_MODEL, LOG_CONTEXT, CONTEXT_LOG_FILE
+from config import (
+    HOST, PORT, LLM_PROVIDER, OLLAMA_MODEL, ARK_MODEL, LOG_CONTEXT, CONTEXT_LOG_FILE,
+    WECOM_ENABLED, SHOW_REAL_IP,
+)
 from pipeline.llm_client import stream_chat, chat_once
 from pipeline.text_router import route
-from pipeline.conversation import ConversationManager
+from pipeline.conversation import ConversationManager, clean_for_memory
 
 app = FastAPI(title="Robot Head Demo")
 # 全局唯一的会话管理器：按 session_id 维护每个用户的多轮历史。
@@ -87,6 +91,26 @@ def _log_output(session, assistant_raw, note="", who=""):
     _emit(f"[{ts}][{who}][会话 {session.id[:8]}] 模型输出{note}: {assistant_raw.strip()}\n" + "=" * 70)
 
 
+def _fmt_peer(ws) -> str:
+    """把客户端地址格式化成便于阅读的字符串。
+
+    - SHOW_REAL_IP=0：恒显示本机回环 127.0.0.1:<端口>（永远 IPv4）；
+    - IPv6 的 v4-映射地址 ::ffff:1.2.3.4 → 还原成纯 IPv4；
+    - 纯 IPv6 → 用 [] 包裹，避免和端口冒号混淆。
+    """
+    if not ws.client:
+        return "?"
+    host = ws.client.host
+    port = ws.client.port
+    if not SHOW_REAL_IP:
+        return f"127.0.0.1:{port}"
+    if host.startswith("::ffff:") and "." in host:
+        host = host.split("::ffff:")[-1]  # v4-映射地址还原为纯 IPv4
+    elif ":" in host:
+        host = f"[{host}]"                 # 纯 IPv6 加方括号
+    return f"{host}:{port}"
+
+
 # 前端静态资源目录（与 backend 同级的 frontend/）
 FRONTEND_DIR = (Path(__file__).resolve().parent.parent / "frontend")
 
@@ -105,6 +129,94 @@ async def health():
     """健康检查：确认服务在线并回报当前使用的模型名。"""
     model = ARK_MODEL if LLM_PROVIDER == "ark" else OLLAMA_MODEL
     return {"ok": True, "provider": LLM_PROVIDER, "model": model}
+
+
+# =====================================================================
+# 企业微信（自建应用 + 回调）：文本对话入口
+# 复用 ConversationManager，用企业微信用户 ID 作为 session_id 维护多轮上下文。
+# =====================================================================
+async def _wecom_generate_reply(session_id: str, text: str) -> str:
+    """跑一轮 LLM，返回清洗后的完整文本（去掉 [表情:x]/[动作:x] 标记）。"""
+    session = conversations.get(session_id)
+    session.begin_turn(text)
+    messages = session.build_messages(text)
+    _log_context(session, messages, text, who=f"wecom:{session_id}")
+
+    chunks = []
+    try:
+        async for tok in stream_chat(messages):
+            chunks.append(tok)
+    except Exception as e:  # noqa: BLE001
+        session.rollback_turn()
+        _log_output(session, f"[出错] {e}", who=f"wecom:{session_id}")
+        raise
+
+    raw = "".join(chunks)
+    session.commit_turn(raw)
+    _log_output(session, raw, who=f"wecom:{session_id}")
+    reply = clean_for_memory(raw)
+    return reply or "（无回复）"
+
+
+async def _wecom_handle(from_user: str, text: str):
+    """后台任务：生成回复并通过应用消息接口主动推送给用户。"""
+    from pipeline import wecom
+    try:
+        reply = await _wecom_generate_reply(from_user, text)
+        await wecom.send_text(from_user, reply)
+    except Exception as e:  # noqa: BLE001
+        _emit(f"[WECOM] 处理消息失败 user={from_user}: {e}")
+        try:
+            await wecom.send_text(from_user, "抱歉，我这会儿有点忙，稍后再试试～")
+        except Exception:
+            pass
+
+
+if WECOM_ENABLED:
+    from pipeline import wecom
+
+    @app.get("/wecom/callback")
+    async def wecom_verify(msg_signature: str = "", timestamp: str = "", nonce: str = "", echostr: str = ""):
+        """URL 验证：校验签名后返回解密的 echostr 明文。"""
+        if not wecom.crypto.verify_signature(msg_signature, timestamp, nonce, echostr):
+            return PlainTextResponse("signature error", status_code=403)
+        try:
+            plain = wecom.crypto.decrypt(echostr)
+        except Exception as e:  # noqa: BLE001
+            _emit(f"[WECOM] echostr 解密失败: {e}")
+            return PlainTextResponse("decrypt error", status_code=403)
+        return PlainTextResponse(plain)
+
+    @app.post("/wecom/callback")
+    async def wecom_receive(request: Request, msg_signature: str = "", timestamp: str = "", nonce: str = ""):
+        """接收消息：校验签名 → 解密 → 解析文本 → 后台异步回复。立即返回空 200。"""
+        body = await request.body()
+        try:
+            root = ET.fromstring(body.decode("utf-8"))
+            encrypt = root.findtext("Encrypt") or ""
+        except Exception as e:  # noqa: BLE001
+            _emit(f"[WECOM] 请求体解析失败: {e}")
+            return Response(status_code=400)
+
+        if not wecom.crypto.verify_signature(msg_signature, timestamp, nonce, encrypt):
+            return PlainTextResponse("signature error", status_code=403)
+
+        try:
+            plain_xml = wecom.crypto.decrypt(encrypt)
+            msg = wecom.parse_message(plain_xml)
+        except Exception as e:  # noqa: BLE001
+            _emit(f"[WECOM] 消息解密失败: {e}")
+            return Response(status_code=400)
+
+        _emit(f"[WECOM-RECV] {msg}")
+        if msg.get("MsgType") == "text":
+            from_user = msg.get("FromUserName", "")
+            content = (msg.get("Content") or "").strip()
+            if from_user and content:
+                asyncio.create_task(_wecom_handle(from_user, content))
+
+        # 被动回复留空即可，回复走异步主动发消息
+        return Response(status_code=200)
 
 
 # =====================================================================
@@ -202,7 +314,7 @@ async def ws_endpoint(ws: WebSocket):
     await ws.accept()
 
     conn_id = uuid.uuid4().hex[:6]
-    peer = f"{ws.client.host}:{ws.client.port}" if ws.client else "?"
+    peer = _fmt_peer(ws)
     _emit(f"[WS #{conn_id}] 新连接来自 {peer}")
 
     session = None                       # 本连接绑定的会话，收到 hello 后确定
@@ -332,6 +444,12 @@ if __name__ == "__main__":
     # 直接运行本文件即启动服务（开发用）。生产可用 uvicorn 命令另行部署。
     import uvicorn
 
-    uvicorn.run("server:app", host=HOST, port=PORT, reload=False)
+    # proxy_headers：True 时信任 cloudflared 等反代的转发头以显示真实来源 IP；
+    # SHOW_REAL_IP=0 时关闭，来源恒为本机 127.0.0.1。
+    uvicorn.run("server:app", host=HOST, port=PORT, reload=False,
+                proxy_headers=SHOW_REAL_IP)
+
+
+
 
 

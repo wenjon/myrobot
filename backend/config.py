@@ -36,6 +36,12 @@ SYSTEM_PROMPT = os.getenv(
 HOST = os.getenv("HOST", "127.0.0.1")
 PORT = int(os.getenv("PORT", "8000"))
 
+# 日志中的客户端来源地址显示方式：
+#   1（默认）= 显示真实来源 IP（信任 cloudflared 等本地反代的转发头）；
+#             IPv6 的 v4-映射地址会被还原成纯 IPv4，纯 IPv6 会加方括号。
+#   0        = 不信任转发头，来源恒为本机 127.0.0.1:<端口>（永远是 IPv4）。
+SHOW_REAL_IP = os.getenv("SHOW_REAL_IP", "1") == "1"
+
 
 
 # ---- 上下文管理 ----
@@ -59,3 +65,15 @@ CONTEXT_LOG_FILE = os.getenv(
     os.path.join(os.path.dirname(__file__), "logs", "context.log"),
 )
 
+
+# ---- 企业微信（自建应用 + 回调）----
+# 企业 ID（我的企业 → 企业信息 → 企业ID）
+WECOM_CORP_ID = os.getenv("WECOM_CORP_ID", "")
+# 自建应用的 AgentId 与 Secret（应用管理 → 自建 → 你的应用）
+WECOM_AGENT_ID = os.getenv("WECOM_AGENT_ID", "")
+WECOM_SECRET = os.getenv("WECOM_SECRET", "")
+# 接收消息服务器配置里的 Token 与 EncodingAESKey（用于回调签名校验 + 消息加解密）
+WECOM_TOKEN = os.getenv("WECOM_TOKEN", "")
+WECOM_AES_KEY = os.getenv("WECOM_AES_KEY", "")
+# 是否启用企业微信回调路由（需以上参数齐全）
+WECOM_ENABLED = bool(WECOM_CORP_ID and WECOM_AGENT_ID and WECOM_SECRET and WECOM_TOKEN and WECOM_AES_KEY)
