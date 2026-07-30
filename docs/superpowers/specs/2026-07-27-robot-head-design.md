@@ -256,3 +256,45 @@ backend/tools/
 
 ### 11.6 新增 WS 消息
 - 服务端 → 客户端：`{"type":"interrupted","reason":"question|interrupt|always"}`。
+
+
+## 12. 服务装配与生命周期（lifespan / app boot）
+
+### 12.1 启动顺序（按时间）
+1. `python -c "import server"` → 加载所有模块（pipeline / tools / server_app），触发装饰器注册工具。
+2. `config.LOG_CONTEXT` 为真 → 打开上下文日志文件。
+3. `REGISTRY.set_logger()` + `load_all()` → 工具框架接入日志，启动时扫描子包自动注册所有工具。
+4. 启动 `uvicorn` → 应用进入“接受请求”状态。
+
+### 12.2 生命周期钩子（FastAPI lifespan）
+代码在 `server.py` 顶部（`FastAPI(...)` 之前）：
+
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        yield                       # 应用运行期
+    finally:
+        await REGISTRY.teardown_all()  # 逐个调工具的 teardown()
+        await RESOURCES.aclose()       # 关闭共享资源（httpx client 等）
+```
+
+为什么不用 `@app.on_event("shutdown")` 了？
+- 该接口从 FastAPI 0.93 弱化，上游 Starlette 也公告将移除；
+- `lifespan` 是推荐替代，一个函数同时表达 startup + shutdown，代码更集中。
+
+扩展点：未来可在 `try: yield` 之前加任务（如预热连接池、定时任务、预加载模型等）。
+
+### 12.3 关闭顺序（为什么是这个顺序）
+服务器收到中止信号时（Ctrl+C / SIGTERM）：
+1. uvicorn 停止接受新连接；
+2. 现有 WS 连接走 finally —— 中止当前轮 + 上传“停止哨兵”给 worker；
+3. 应用交出 lifespan；调用 `teardown_all()` → `RESOURCES.aclose()`；
+4. uvicorn 退出。
+
+各步都会 catch 异常并记日志，不会因某个工具的 teardown 报错而拖累其它。
+
+### 12.4 调试提示
+- 查看工具是否都加载了：`python -c "from tools import load_all, REGISTRY; load_all(); print([t.name for t in REGISTRY.all()])"`
+- 查看当前对 LLM 暴露了哪些工具：同上，加 `REGISTRY.schemas(max_permission=Permission.<level>)`
+- 查看服务是否在跳动：`netstat -ano | findstr :8000`（Windows）/`lsof -i :8000`（macOS/Linux）
