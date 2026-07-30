@@ -15,6 +15,7 @@ import asyncio
 import json
 import os
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -43,7 +44,25 @@ from server_app.logging import get_logger
 from server_app.notify import notify_interrupted as _notify_interrupted
 from server_app.peers import format_peer
 
-app = FastAPI(title="Robot Head Demo")
+# ---------------------------------------------------------------------
+# 应用生命周期（lifespan）：启动时初始化工具、关闭时释放资源。
+# 这是 FastAPI 新推荐的写法，取代已弱化的 @app.on_event("startup"/"shutdown")。
+#   - yield 之前的代码在应用接受请求前运行；
+#   - yield 之后的代码在应用关闭时运行（包括任何异常退出）。
+# 必须在 FastAPI(...) 之前定义，所以放在这里。
+# ---------------------------------------------------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # ---- startup 阶段：预留扩展点（如初始化定时任务 / 预热连接池等） ----
+    try:
+        yield
+    finally:
+        # ---- shutdown 阶段：释放工具占用的共享资源（HTTP client / 未来的 DB 连接池 / 串口句柄） ----
+        await REGISTRY.teardown_all()
+        await RESOURCES.aclose()
+
+
+app = FastAPI(title="Robot Head Demo", lifespan=lifespan)
 # 全局唯一的会话管理器：按 session_id 维护每个用户的多轮历史。
 conversations = ConversationManager()
 
@@ -270,13 +289,12 @@ if FRONTEND_DIR.exists():
     app.mount("/app", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="app")
 
 
-@app.on_event("shutdown")
-async def _on_shutdown():
-    """服务关闭时释放工具占用的共享资源（HTTP client / 未来的 DB/串口）。"""
-    await REGISTRY.teardown_all()
-    await RESOURCES.aclose()
-
-
+# ---------------------------------------------------------------------
+# 应用生命周期（lifespan）：启动时初始化工具、关闭时释放资源。
+# 这是 FastAPI 新推荐的写法，取代已弱化的 @app.on_event("startup"/"shutdown")。
+#   - yield 之前的代码在应用接受请求前运行；
+#   - yield 之后的代码在应用关闭时运行（包括任何异常退出）。
+# ---------------------------------------------------------------------
 if __name__ == "__main__":
     # 直接运行本文件即启动服务（开发用）。生产可用 uvicorn 命令另行部署。
     import uvicorn
