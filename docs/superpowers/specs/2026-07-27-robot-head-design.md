@@ -113,3 +113,55 @@ LLM 输出约定（system prompt 引导）:
 - 2D 头升级 Three.js 3D + ARKit 52 BlendShape。
 - 加入伺服时序补偿模块（当前为接口占位）。
 - 全局时钟对齐、智能降级策略。
+
+
+## 10. 工具调用框架（tools / function calling）
+
+让 LLM 具备「联网搜索、处理文档、读数据库、调用硬件 API」等能力。核心原理：LLM 不能直接执行动作，只能**输出结构化调用请求**，由后端真正执行并把结果回喂，LLM 再据此作答。
+
+### 10.1 设计目标
+- 插件化：新增工具 = 新建一个文件放进 `tools/<分类>/`，自动被发现，**不改核心链路**。
+- 统一契约：不论底层是 HTTP / SQL / 串口，对 LLM 都是 name + JSON Schema。
+- 分级权限：`read` / `write` / `dangerous`，执行前经安全闸门；默认只放开 `read`。
+- 资源复用：DB 连接池 / HTTP client / 串口句柄由 `ResourceManager` 懒加载并复用，关闭时统一释放。
+- 可观测：超时、异常隔离、调用日志（复用 `[#连接号]` 前缀）。
+
+### 10.2 目录结构
+```
+backend/tools/
+  base.py       # Tool 抽象基类 / ToolCategory / Permission / ToolResult / ToolContext
+  registry.py   # ToolRegistry：注册、按分类/权限导出 schema、执行分发；@tool 装饰器
+  loader.py     # 启动时扫描子包自动注册（插件发现）
+  context.py    # ResourceManager：共享 HTTP client / 未来 DB/串口
+  builtin/basic.py    # 零依赖工具：get_time / echo
+  web/web_search.py   # 联网搜索（Tavily）
+  # 未来：document/ database/ hardware/ 按同一 Tool 契约添加
+```
+
+### 10.3 编排（pipeline/agent.py，两阶段）
+- 阶段一（工具循环，非流式）：`chat_with_tools` 带工具清单请求 LLM；
+  若返回 `tool_calls` 则执行工具→结果作为 `role:tool` 回喂→再探测，最多 `TOOL_MAX_ROUNDS` 轮。
+- 阶段二（最终答，流式）：基于工具结果调用 `stream_chat`，复用现有分句/表情/口型链路。
+- 若 LLM 一开始就直接作答（无工具），直接产出该答案，省一次调用。
+- `ENABLE_TOOLS=0` 时行为完全退回原纯流式。
+
+### 10.4 新增 WS 消息
+- 服务端 → 客户端：`{"type":"status","text":"正在联网搜索：xxx"}`（工具执行时提示，前端显示在状态栏）。
+
+### 10.5 相关配置（config.py）
+- `ENABLE_TOOLS`（默认 1）、`TOOL_MAX_ROUNDS`（默认 3）、`TOOL_MAX_PERMISSION`（默认 read）。
+- `TAVILY_API_KEY` / `TAVILY_URL`：联网搜索后端。
+
+### 10.6 扩展新工具的步骤
+1. 在 `tools/<分类>/` 新建 `.py`，用 `@tool(...)` 装饰函数或继承 `Tool` 类；
+2. 写清 `description`（何时用/不该用）与 `parameters`（JSON Schema）；
+3. 有状态资源放进 `ResourceManager`，通过 `ctx.resources` 获取；
+4. 若在新分类目录，在 `loader.py` 的 `_TOOL_PACKAGES` 登记一次。
+- 文档类：解析后先切块/检索，只回喂相关片段，避免撑爆上下文。
+- 数据库类：建议只读 + 参数化/白名单，防注入。
+- 硬件类：标 `dangerous`，默认被闸门拦截，需显式提升权限或加确认流程。
+
+### 10.7 供应商兼容性
+- Ark（OpenAI 兼容）：已验证支持 `tools`（`ark-code-latest` 实测可用）。
+- Ollama：`/api/chat` 支持 `tools`，但仅部分模型（qwen2.5 / llama3.1 等）；gemma 系列较弱。
+- 兜底：不支持原生 tools 的模型可改用 ReAct 提示词模式，后端正则解析动作。
