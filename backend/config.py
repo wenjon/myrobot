@@ -44,6 +44,19 @@ SHOW_REAL_IP = os.getenv("SHOW_REAL_IP", "1") == "1"
 
 
 
+# ---- 工具调用（tools / function calling）----
+# 是否启用工具调用（让 LLM 能调用 get_time / web_search 等）
+ENABLE_TOOLS = os.getenv("ENABLE_TOOLS", "1") == "1"
+# 单轮对话中最多连续调用工具的回合数（防止无限循环）
+TOOL_MAX_ROUNDS = int(os.getenv("TOOL_MAX_ROUNDS", "3"))
+# 允许暴露给 LLM 的最高权限级别：read / write / dangerous
+# 默认 read：只放开只读工具；硬件写操作等需显式提升。
+TOOL_MAX_PERMISSION = os.getenv("TOOL_MAX_PERMISSION", "read")
+
+# 联网搜索（Tavily）
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "REDACTED_TAVILY_API_KEY")
+TAVILY_URL = os.getenv("TAVILY_URL", "https://api.tavily.com/search")
+
 # ---- 上下文管理 ----
 # 滑动窗口保留最近 N 轮（1 轮 = user + assistant）
 MAX_TURNS = int(os.getenv("MAX_TURNS", "10"))
@@ -65,15 +78,3 @@ CONTEXT_LOG_FILE = os.getenv(
     os.path.join(os.path.dirname(__file__), "logs", "context.log"),
 )
 
-
-# ---- 企业微信（自建应用 + 回调）----
-# 企业 ID（我的企业 → 企业信息 → 企业ID）
-WECOM_CORP_ID = os.getenv("WECOM_CORP_ID", "")
-# 自建应用的 AgentId 与 Secret（应用管理 → 自建 → 你的应用）
-WECOM_AGENT_ID = os.getenv("WECOM_AGENT_ID", "")
-WECOM_SECRET = os.getenv("WECOM_SECRET", "")
-# 接收消息服务器配置里的 Token 与 EncodingAESKey（用于回调签名校验 + 消息加解密）
-WECOM_TOKEN = os.getenv("WECOM_TOKEN", "")
-WECOM_AES_KEY = os.getenv("WECOM_AES_KEY", "")
-# 是否启用企业微信回调路由（需以上参数齐全）
-WECOM_ENABLED = bool(WECOM_CORP_ID and WECOM_AGENT_ID and WECOM_SECRET and WECOM_TOKEN and WECOM_AES_KEY)

@@ -131,7 +131,80 @@ async def stream_chat(messages: List[Dict[str, str]], temperature: float = 0.7) 
             yield tok
 
 
+# =====================================================================
+# 工具调用：非流式请求，返回 {content, tool_calls}
+# 第一阶段用它探测「LLM 是否想调用工具」；无工具则可回退流式直接答。
+# =====================================================================
+async def chat_with_tools(messages: List[Dict], tools: List[Dict],
+                          temperature: float = 0.3) -> Dict:
+    """带 tools 的非流式对话。
+
+    返回: {"content": str, "tool_calls": [{"id","name","arguments"(dict)}...]}
+    tool_calls 为空表示 LLM 选择直接回答（不调用工具）。
+    """
+    if LLM_PROVIDER == "ark":
+        return await _ark_with_tools(messages, tools, temperature)
+    return await _ollama_with_tools(messages, tools, temperature)
+
+
+
 async def chat_once(messages: List[Dict[str, str]], temperature: float = 0.3) -> str:
     if LLM_PROVIDER == "ark":
         return await _ark_once(messages, temperature)
     return await _ollama_once(messages, temperature)
+
+
+# ---- Ark: 带 tools 的非流式实现 ----
+async def _ark_with_tools(messages, tools, temperature):
+    payload = {
+        "model": ARK_MODEL,
+        "messages": messages,
+        "stream": False,
+        "temperature": temperature,
+        "tools": tools,
+        "tool_choice": "auto",
+    }
+    url = f"{ARK_BASE_URL}/chat/completions"
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        resp = await client.post(url, headers=_ark_headers(), json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+    msg = data["choices"][0]["message"]
+    return _normalize_toolcalls(msg)
+
+
+# ---- Ollama: 带 tools 的非流式实现 ----
+async def _ollama_with_tools(messages, tools, temperature):
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": messages,
+        "stream": False,
+        "tools": tools,
+        "options": {"temperature": temperature},
+    }
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        resp = await client.post(f"{OLLAMA_URL}/api/chat", json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+    msg = data.get("message", {})
+    return _normalize_toolcalls(msg)
+
+
+def _normalize_toolcalls(msg: Dict) -> Dict:
+    """把 Ark(OpenAI) 与 Ollama 两种 message 结构统一成
+    {content, tool_calls:[{id,name,arguments(dict)}]}。"""
+    content = msg.get("content") or ""
+    calls = []
+    for i, tc in enumerate(msg.get("tool_calls") or []):
+        fn = tc.get("function", {}) or {}
+        name = fn.get("name", "")
+        raw_args = fn.get("arguments", {})
+        if isinstance(raw_args, str):
+            try:
+                args = json.loads(raw_args) if raw_args.strip() else {}
+            except json.JSONDecodeError:
+                args = {}
+        else:
+            args = raw_args or {}
+        calls.append({"id": tc.get("id") or f"call_{i}", "name": name, "arguments": args})
+    return {"content": content, "tool_calls": calls}

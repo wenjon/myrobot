@@ -15,21 +15,22 @@ import asyncio
 import json
 import os
 import uuid
-import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse, PlainTextResponse, Response
+from fastapi.responses import RedirectResponse
 
 from config import (
     HOST, PORT, LLM_PROVIDER, OLLAMA_MODEL, ARK_MODEL, LOG_CONTEXT, CONTEXT_LOG_FILE,
-    WECOM_ENABLED, SHOW_REAL_IP,
+    SHOW_REAL_IP,
 )
 from pipeline.llm_client import stream_chat, chat_once
 from pipeline.text_router import route
-from pipeline.conversation import ConversationManager, clean_for_memory
+from pipeline.conversation import ConversationManager
+from pipeline.agent import agent_stream
+from tools import REGISTRY, RESOURCES, load_all
 
 app = FastAPI(title="Robot Head Demo")
 # 全局唯一的会话管理器：按 session_id 维护每个用户的多轮历史。
@@ -59,6 +60,12 @@ def _emit(line: str):
     if _log_fh:
         _log_fh.write(line + "\n")
         _log_fh.flush()  # 立即落盘，保证前台 tail 时能实时看到
+
+
+# 工具框架接入日志系统，并在启动时自动发现/加载所有工具。
+REGISTRY.set_logger(_emit)
+_loaded_tools = load_all(_emit)
+_emit(f"[启动] 已加载工具: {[t.name for t in REGISTRY.all()]}")
 
 
 def _log_context(session, messages, user_text, who=""):
@@ -132,94 +139,6 @@ async def health():
 
 
 # =====================================================================
-# 企业微信（自建应用 + 回调）：文本对话入口
-# 复用 ConversationManager，用企业微信用户 ID 作为 session_id 维护多轮上下文。
-# =====================================================================
-async def _wecom_generate_reply(session_id: str, text: str) -> str:
-    """跑一轮 LLM，返回清洗后的完整文本（去掉 [表情:x]/[动作:x] 标记）。"""
-    session = conversations.get(session_id)
-    session.begin_turn(text)
-    messages = session.build_messages(text)
-    _log_context(session, messages, text, who=f"wecom:{session_id}")
-
-    chunks = []
-    try:
-        async for tok in stream_chat(messages):
-            chunks.append(tok)
-    except Exception as e:  # noqa: BLE001
-        session.rollback_turn()
-        _log_output(session, f"[出错] {e}", who=f"wecom:{session_id}")
-        raise
-
-    raw = "".join(chunks)
-    session.commit_turn(raw)
-    _log_output(session, raw, who=f"wecom:{session_id}")
-    reply = clean_for_memory(raw)
-    return reply or "（无回复）"
-
-
-async def _wecom_handle(from_user: str, text: str):
-    """后台任务：生成回复并通过应用消息接口主动推送给用户。"""
-    from pipeline import wecom
-    try:
-        reply = await _wecom_generate_reply(from_user, text)
-        await wecom.send_text(from_user, reply)
-    except Exception as e:  # noqa: BLE001
-        _emit(f"[WECOM] 处理消息失败 user={from_user}: {e}")
-        try:
-            await wecom.send_text(from_user, "抱歉，我这会儿有点忙，稍后再试试～")
-        except Exception:
-            pass
-
-
-if WECOM_ENABLED:
-    from pipeline import wecom
-
-    @app.get("/wecom/callback")
-    async def wecom_verify(msg_signature: str = "", timestamp: str = "", nonce: str = "", echostr: str = ""):
-        """URL 验证：校验签名后返回解密的 echostr 明文。"""
-        if not wecom.crypto.verify_signature(msg_signature, timestamp, nonce, echostr):
-            return PlainTextResponse("signature error", status_code=403)
-        try:
-            plain = wecom.crypto.decrypt(echostr)
-        except Exception as e:  # noqa: BLE001
-            _emit(f"[WECOM] echostr 解密失败: {e}")
-            return PlainTextResponse("decrypt error", status_code=403)
-        return PlainTextResponse(plain)
-
-    @app.post("/wecom/callback")
-    async def wecom_receive(request: Request, msg_signature: str = "", timestamp: str = "", nonce: str = ""):
-        """接收消息：校验签名 → 解密 → 解析文本 → 后台异步回复。立即返回空 200。"""
-        body = await request.body()
-        try:
-            root = ET.fromstring(body.decode("utf-8"))
-            encrypt = root.findtext("Encrypt") or ""
-        except Exception as e:  # noqa: BLE001
-            _emit(f"[WECOM] 请求体解析失败: {e}")
-            return Response(status_code=400)
-
-        if not wecom.crypto.verify_signature(msg_signature, timestamp, nonce, encrypt):
-            return PlainTextResponse("signature error", status_code=403)
-
-        try:
-            plain_xml = wecom.crypto.decrypt(encrypt)
-            msg = wecom.parse_message(plain_xml)
-        except Exception as e:  # noqa: BLE001
-            _emit(f"[WECOM] 消息解密失败: {e}")
-            return Response(status_code=400)
-
-        _emit(f"[WECOM-RECV] {msg}")
-        if msg.get("MsgType") == "text":
-            from_user = msg.get("FromUserName", "")
-            content = (msg.get("Content") or "").strip()
-            if from_user and content:
-                asyncio.create_task(_wecom_handle(from_user, content))
-
-        # 被动回复留空即可，回复走异步主动发消息
-        return Response(status_code=200)
-
-
-# =====================================================================
 # 单轮对话核心：LLM 流式 → 中央调度 → WS 推送，并做上下文安全提交
 # =====================================================================
 async def _run_dialog(ws: WebSocket, session, text: str, cancel: asyncio.Event, who: str = ""):
@@ -244,9 +163,23 @@ async def _run_dialog(ws: WebSocket, session, text: str, cancel: asyncio.Event, 
     assistant_text = []   # 收集模型完整输出（含动作标记，用于日志/入库）
     produced = False      # 是否已向前端产出过至少一句（用于打断时判断）
 
+    async def _emit_status(text: str):
+        """把工具执行状态推给前端（如“正在联网搜索…”），让数字人显示提示。"""
+        try:
+            await ws.send_text(json.dumps({"type": "status", "text": text}, ensure_ascii=False))
+        except Exception:
+            pass
+
     async def token_stream():
-        """把 Ollama 的流式 token 逐个吐出；收到打断信号就停。"""
-        async for tok in stream_chat(messages):
+        """经 Agent（含工具调用）产出最终答案 token；收到打断信号就停。"""
+        async for tok in agent_stream(
+            messages,
+            session_id=session.id,
+            conn_id=who.split()[0].lstrip('#') if who else '',
+            cancel=cancel,
+            emit_status=_emit_status,
+            log_fn=_emit,
+        ):
             if cancel.is_set():
                 break
             assistant_text.append(tok)
@@ -438,6 +371,13 @@ async def no_cache_static(request, call_next):
 # 挂载前端静态资源（放在路由定义之后，避免覆盖 API 路由）
 if FRONTEND_DIR.exists():
     app.mount("/app", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="app")
+
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    """服务关闭时释放工具占用的共享资源（HTTP client / 未来的 DB/串口）。"""
+    await REGISTRY.teardown_all()
+    await RESOURCES.aclose()
 
 
 if __name__ == "__main__":

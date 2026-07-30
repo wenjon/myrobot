@@ -65,6 +65,9 @@ const ws = connect(WS_URL, {
         if (msg.value.includes('点头')) head.triggerNod();
         else if (msg.value.includes('摇头')) head.triggerShake();
       }
+    } else if (msg.type === 'status') {
+      // 工具执行状态（如“正在联网搜索…”），显示在状态栏
+      statusEl.textContent = msg.text || '处理中…';
     } else if (msg.type === 'llm_done') {
       statusEl.textContent = '已连接';
     } else if (msg.type === 'error') {
