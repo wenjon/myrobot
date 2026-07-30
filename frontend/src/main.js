@@ -1,6 +1,6 @@
 ﻿import { createHead3D } from './head3d.js';
 import { connect } from './ws.js';
-import { speak, cancel } from './tts.js';
+import { speak, cancel, softStop } from './tts.js';
 import { visemeForChar, CLOSED } from './viseme.js';
 
 const canvas = document.getElementById('face');
@@ -42,6 +42,17 @@ function driveMouth(char) {
   mouthTimer = setTimeout(() => head.mouthClosed(), 130);
 }
 
+// 进入“我在听”收尾状态：渐弱停口播 + 倾听表情；短暂保持后自动恢复（新一轮回答会接管表情）。
+let listenTimer = null;
+function enterListening() {
+  softStop();                 // 渐弱软停当前语音
+  if (head) head.setListening(true);
+  statusEl.textContent = '我在听…';
+  clearTimeout(listenTimer);
+  // 兽底恢复：若新一轮回答因某种原因没接上，1.5s 后自动退出倾听表情。
+  listenTimer = setTimeout(() => { if (head) head.setListening(false); }, 1500);
+}
+
 const EMOTION_SET = new Set(['平静', '开心', '悲伤', '生气', '惊讶', '疑惑']);
 
 // WebSocket 地址：按当前页面协议自动选择 ws/wss，指向同源 /ws。
@@ -54,6 +65,8 @@ const ws = connect(WS_URL, {
   onClose: () => { statusEl.textContent = '断开，重连中…'; statusEl.className = 'bad'; },
   onMessage: (msg) => {
     if (msg.type === 'sentence') {
+      if (head) head.setListening(false);  // 新回答开口，退出倾听表情
+      clearTimeout(listenTimer);
       log('bot', msg.text);
       speak(msg.text, msg.seq, (b) => driveMouth(b.char), () => {});
     } else if (msg.type === 'action') {
@@ -76,6 +89,9 @@ const ws = connect(WS_URL, {
       sessionId = msg.session; localStorage.setItem('robot_session', sessionId);
     } else if (msg.type === 'cleared') {
       logEl.innerHTML = ''; statusEl.textContent = '已连接（新对话）';
+    } else if (msg.type === 'interrupted') {
+      // 服务端自动打断（barge-in）：做自然收尾——声音渐弱 + 切“我在听”倾听表情。
+      enterListening();
     }
   }
 });

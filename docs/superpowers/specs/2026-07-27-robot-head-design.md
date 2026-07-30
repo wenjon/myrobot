@@ -186,3 +186,36 @@ backend/tools/
 - Ark（OpenAI 兼容）：已验证支持 `tools`（`ark-code-latest` 实测可用）。
 - Ollama：`/api/chat` 支持 `tools`，但仅部分模型（qwen2.5 / llama3.1 等）；gemma 系列较弱。
 - 兜底：不支持原生 tools 的模型可改用 ReAct 提示词模式，后端正则解析动作。
+
+## 11. 对话轮次策略与自然收尾（turn-taking / barge-in）
+
+### 11.1 问题
+数字人正在说话时，用户又发了一句，到底应该“继续说 / 立即停 / 其它”？
+硬打断（来一句就戳断）会丢失未开口那轮的上下文；完全排队又不能及时响应“别说了”。
+
+### 11.2 三种模式（config.INTERRUPT_MODE）
+- `queue`：排队依次说，只有点“打断”按钮才中止（最保守）。
+- `always`：硬打断，任何新消息都立即中止当前播报。
+- `smart`（默认）：先分类再决定，兼顾反应速度与上下文完整。
+
+### 11.3 smart 分类（pipeline/turn_policy.py）
+`classify_incoming(text)` 返回三类，只用轻量规则（关键词 + 长度），零延迟：
+- `interrupt`：命中 停/别说了/不对/换个话题 等意图词 → barge-in。
+- `backchannel`：嗯/对/好的/哈哈 等应声词（整句即一个词且较短）→ 不打断、继续说。
+- `question`：其它需要正经回答的内容 → barge-in。
+接口稳定，以后可无缝替换为小模型分类器。
+
+### 11.4 自然收尾（“被打断”体验）
+区分两种中止：
+- 手动打断（`interrupt` 按钮）：用户主动要求立即安静 → 前端 `cancel()` 硬停，不做渐弱。
+- 自动 barge-in（always / smart 判定 interrupt|question）：服务端额外下发 `interrupted`，前端做人性化收尾：
+  1) `tts.softStop()`：丢掉后续排队句，给当前句一个 ~220ms “说完余音”窗口再 cancel（模拟渐弱拖尾）；
+  2) `head.setListening(true)`：切“我在听”倾听表情（眉根微抬 + 双眼微睁 + 头部轻微侧倾）；
+  3) 新一轮 `sentence` 到达时自动 `setListening(false)`；兜底 1.5s 后自动退出倾听。
+注：Web Speech API 无法中途改音量，“渐弱”实为短延迟 cancel 的近似实现。
+
+### 11.5 上下文处理
+被打断那轮已产出的文本仍写入会话历史（部分回答）；附和词不入队也不打断，仅日志记录。
+
+### 11.6 新增 WS 消息
+- 服务端 → 客户端：`{"type":"interrupted","reason":"question|interrupt|always"}`。

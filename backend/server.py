@@ -241,6 +241,26 @@ async def _run_dialog(ws: WebSocket, session, text: str, cancel: asyncio.Event, 
 
 
 # =====================================================================
+# 自然收尾：自动打断（barge-in）时通知前端做人性化收尾
+# =====================================================================
+async def _notify_interrupted(ws: WebSocket, reason: str = ""):
+    """告知前端“这是自动打断”，让它做自然收尾。
+
+    与“手动点击打断按钮”（mtype==interrupt）区分：
+    手动打断是用户主动要求立即安静，不需要渐弱/倾听表情；
+    而自动 barge-in（always / smart 判定为提问或打断词）是“我听到你又说话了”，
+    体验上应该像真人一样把声音渐弱、换上“我在听”的倾听表情。
+    """
+    try:
+        await ws.send_text(json.dumps(
+            {"type": "interrupted", "reason": reason},
+            ensure_ascii=False,
+        ))
+    except Exception:
+        pass
+
+
+# =====================================================================
 # WebSocket 端点：接收前端消息，用「队列 + 单 worker」保证顺序处理
 # =====================================================================
 @app.websocket("/ws")
@@ -354,6 +374,8 @@ async def ws_endpoint(ws: WebSocket):
                     c = worker_current.get("cancel")
                     if c:
                         c.set()
+                        # 通知前端做自然收尾（渐弱 + “我在听”倾听表情）
+                        await _notify_interrupted(ws, reason="always")
                     _drain_queue()
                     await queue.put(text)
                     continue
@@ -369,6 +391,8 @@ async def ws_endpoint(ws: WebSocket):
                 c = worker_current.get("cancel")
                 if c:
                     c.set()
+                    # 通知前端做自然收尾（渐弱 + “我在听”倾听表情）
+                    await _notify_interrupted(ws, reason=kind)
                 _drain_queue()
                 await queue.put(text)
     except WebSocketDisconnect:

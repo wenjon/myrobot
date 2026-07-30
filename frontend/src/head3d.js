@@ -110,6 +110,22 @@ export async function createHead3D(canvas, avatarUrl) {
     for (const k of EXPR_KEYS) setBS(k, set[k] || 0);
   }
 
+  // “我在听”倾听表情：被用户打断时切换，体验上像真人收住话、歪头倾听。
+  // 组合：眉根微抬 + 双眼微睁大 + 嘴微闭 + 头部轻微侧倾（rotation.z）。
+  const LISTEN = { browInnerUp: 0.3, eyeWideLeft: 0.2, eyeWideRight: 0.2 };
+  let listenTilt = 0;  // 目标侧倾角度（弧度），loop 里平滑逼近
+  function setListening(on) {
+    if (on) {
+      for (const k of Object.keys(LISTEN)) setBS(k, LISTEN[k]);
+      mouthClosed();
+      listenTilt = 0.12;
+    } else {
+      // 恢复到当前表情（setExpression 会重置所有表情相关 blendshape）
+      setExpression(currentExpr);
+      listenTilt = 0;
+    }
+  }
+
   // 点头 / 摇头（旋转整个 root 的头部；简化为绕整体）
   let nod = 0, shake = 0;
   function triggerNod() { nod = 1; }
@@ -144,6 +160,9 @@ export async function createHead3D(canvas, avatarUrl) {
     if (shake > 0) { shake = Math.max(0, shake - dt * 2.2); root.rotation.y = Math.sin(shake * Math.PI * 2) * 0.18; }
     else root.rotation.y += (0 - root.rotation.y) * 0.2;
 
+    // 倾听时头部轻微侧倾（平滑逼近目标角度）
+    root.rotation.z += (listenTilt - root.rotation.z) * Math.min(1, 6 * dt);
+
     renderer.render(scene, cam);
     requestAnimationFrame(loop);
   }
@@ -151,7 +170,7 @@ export async function createHead3D(canvas, avatarUrl) {
   mouthClosed();
   requestAnimationFrame(loop);
 
-  return { setViseme, mouthClosed, setExpression, triggerNod, triggerShake };
+  return { setViseme, mouthClosed, setExpression, triggerNod, triggerShake, setListening };
 }
 
 
