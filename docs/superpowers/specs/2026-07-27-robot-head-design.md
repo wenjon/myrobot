@@ -23,7 +23,7 @@
 
 | 环节 | 方案 | 说明 |
 |------|------|------|
-| LLM | 本地 **Ollama** (`/api/chat`, stream=true) | 已就绪，默认模型 `gemma3:12b`（中文好、无思维链、较快），可配置 |
+| LLM | **Ark**（火山引擎 OpenAI 兼容，`/chat/completions`），默认 `ark-code-latest`；本地 **Ollama**（`/api/chat`）作为备选 | 供应商可切换（`config.LLM_PROVIDER`）；默认 Ark 是因为本地不需 GPU 也能走、响应快 |
 | TTS | 浏览器 **Web Speech API** (`SpeechSynthesis`) | 完全离线、内置中文语音、自带 `boundary` 事件（字/词时间戳），零依赖 |
 | 口型对齐 | TTS `boundary` 事件时间戳 → 拼音/音素 → viseme | 前端实时驱动，符合“时间戳=基准时钟” |
 | 虚拟头 | **Three.js** 2D 平面（正交相机 + 精灵/形状） | 嘴型开合 + 基础表情，30FPS+ |
@@ -61,34 +61,66 @@
 ## 4. 模块划分
 
 后端 `backend/`
-- `config.py` — 配置（Ollama URL、模型名、系统提示、分句参数）。
-- `pipeline/llm_client.py` — Ollama 流式客户端（async 生成 token）。
-- `pipeline/text_router.py` — 中央调度：清洗、智能分句、动作/文本分流。
-- `server.py` — FastAPI + WebSocket 端点，编排流水线。
+- `config.py` — 全局配置（供应商 / 模型 / system prompt / 分句参数 / 上下文管理 / 工具框架 / 轮次策略 / 日志 等），全部可环境变量覆盖。
+- `server.py` — FastAPI 装配 + HTTP 路由 + `/ws` 端点（队列与 worker）。单轮对话主循环已迁出到 `server_app/dialog.py`。
+- `server_app/` — 从 server.py 拆出的辅助模块（职责单一）：
+  - `__init__.py`，包描述
+  - `logging.py` — 控制台 + 可选文件日志器（`ContextLogger`）、`log_context` / `log_output`。
+  - `peers.py` — WS 客户端地址格式化（`format_peer`，IPv4/IPv6/转发头）。
+  - `dialog.py` — 单轮对话主循环（`run_dialog`：LLM → 中央调度 → WS 推送 → commit/rollback）。
+  - `notify.py` — 服务端主动下发辅助消息（如 `interrupted`）。
+- `pipeline/` — 业务管线：
+  - `llm_client.py` — LLM 流式客户端（Ark 与 Ollama 两套，`stream_chat` / `chat_once` / `chat_with_tools`）。
+  - `text_router.py` — 中央调度：清洗 / 智能分句 / 动作抽取。
+  - `conversation.py` — 多轮上下文管理（P0 安全提交 + P1 滑动窗口 + 摘要式长期记忆 + TTL 回收）。
+  - `agent.py` — 工具调用编排（两阶段：探测/工具循环 → 流式最终答）。
+  - `turn_policy.py` — smart 轮次策略分类（`classify_incoming`：interrupt / backchannel / question）。
+- `tools/` — 插件式工具框架（详见第 10 章）：
+  - `base.py` — `Tool` / `Permission` / `ToolContext` / `ToolResult` 抽象。
+  - `registry.py` — 全局 `REGISTRY`（注册 / 权限阈门 / 超时 / 日志）与 `@tool` 装饰器。
+  - `loader.py` — 启动时自动扫描子包（builtin/web/document/database/hardware）完成注册。
+  - `context.py` — `RESOURCES`（跨工具复用的资源池，当前仅 httpx.AsyncClient）。
+  - `builtin/basic.py` — `get_time` / `echo`（零依赖）。
+  - `web/web_search.py` — `web_search`（Tavily）。
 
 前端 `frontend/`
 - `index.html` — 页面（画布 + 输入区 + 状态）。
 - `src/ws.js` — WebSocket 客户端。
-- `src/tts.js` — Web Speech 合成 + boundary 时间戳。
+- `src/tts.js` — Web Speech 合成 + `boundary` 时间戳 + `softStop`（渐弱软停）。
 - `src/viseme.js` — 字/拼音 → viseme 权重映射。
-- `src/head.js` — Three.js 2D 头渲染（嘴、眼、眉、表情）。
-- `src/main.js` — 装配与事件流。
+- `src/head3d.js` — Three.js 加载 GLB（ARKit 52 动画 + Oculus viseme），表情 / 口型 / 点头 / 「我在听」倾听表情。
+- `src/main.js` — 装配与事件流（含 `enterListening`）。
 
 ## 5. 接口契约（WebSocket JSON 消息）
 
+以下是完整定义，其中后述个别是后期增量。
+
 客户端 → 服务端:
-- `{"type":"user_message","text":"...", "session":"id"}`
-- `{"type":"interrupt"}`  (barge-in 打断)
+- `{"type":"hello","session":"<sid>"}` — 必须首发；`session` 为空则服务端分配新 sid。未发 hello 前的其他帧会被忽略（保证不会错误绑定到别人的会话）。
+- `{"type":"user_message","text":"...","session":"<sid>"}` — 发送一句用户输入。
+- `{"type":"interrupt"}` — 手动打断（点「打断」按钮）：立即中止当前轮 + 清空队列。不会触发「自然收尾」。
+- `{"type":"clear"}` — 打断 + 清队 + 清空该 sid 的会话历史。
+- `{"type":"ping"}` — 心跳；服务端不回复但会记日志。
 
 服务端 → 客户端:
-- `{"type":"sentence","text":"这是一句播报","seq":0}`
-- `{"type":"action","action":"表情","value":"开心"}`  (提前下发)
-- `{"type":"llm_done"}`
-- `{"type":"error","message":"..."}`
+- `{"type":"session","session":"<sid>"}` — 对 hello 的回应，供前端写入 localStorage 以持久化 sid。
+- `{"type":"sentence","text":"这是一句播报","seq":0}` — 中央调度分击后的一句表达。
+- `{"type":"action","action":"表情|动作","value":"开心"}` — 提前下发的表情/动作指令，让前端表情与语音同步。
+- `{"type":"status","text":"正在联网搜索…"}` — 工具执行状态（如 web_search），让前端状态栏显示。
+- `{"type":"llm_done"}` — 本轮正常结束（已入库）。被打断不发。
+- `{"type":"error","message":"..."}` — LLM/网络/工具等异常。
+- `{"type":"cleared"}` — 对 clear 的确认。
+- `{"type":"interrupted","reason":"question|interrupt|always"}` — 自动 barge-in 时下发（仅 `INTERRUPT_MODE=always/smart` 触发），前端做自然收尾（渐弱 + 「我在听」倾听表情）。详见第 11 章。
+
+协议小结：
+- 连接必须先 `hello` 后才能处理其他帧；
+- 同一个 sid 可以被多个连接共享（不同设备接入）；
+- 会话隔离在 sid 层，不在 ws 连接层；为了上下文不串用户，前端需每个会话独立生成 sid。
 
 LLM 输出约定（system prompt 引导）:
-- 短句口语化；可用行内标记表达动作，如 `[表情:开心]`、`[动作:点头]`。
-- 中央调度负责把标记剥离成 `action` 消息，纯文本作为 `sentence`。
+- 短句口语化；可用行内标记表达动作，如 `[表情:开心]` / `[动作:点头]`。
+- 中央调度（text_router.route）负责把标记剥离成 `action` 消息，纯文本作为 `sentence`。
+- 涉及实时 / 不确定内容需优先调用 web_search 进行联网查证。
 
 ## 6. 分句算法（要点）
 - 按标点（。！？；，、…）与长度阈值（默认 12–24 字）做均衡切割。
@@ -149,7 +181,12 @@ backend/tools/
 - 服务端 → 客户端：`{"type":"status","text":"正在联网搜索：xxx"}`（工具执行时提示，前端显示在状态栏）。
 
 ### 10.5 相关配置（config.py）
-- `ENABLE_TOOLS`（默认 1）、`TOOL_MAX_ROUNDS`（默认 3）、`TOOL_MAX_PERMISSION`（默认 read）。
+
+`backend/config.py` 中的环境变量，分组列出（第 13 章会给出「所有环境变量总览」，这里只列与工具相关的）：
+
+- `ENABLE_TOOLS`（默认 1）：总开关。设为 0 则走原有流式链路（不调工具）。
+- `TOOL_MAX_ROUNDS`（默认 3）：工具循环最多轮次，防止无限调用。
+- `TOOL_MAX_PERMISSION`（默认 `read`）：可暴露给 LLM 的最高权限；`write`/`dangerous` 需显式提升。
 - `TAVILY_API_KEY` / `TAVILY_URL`：联网搜索后端。
 
 ### 10.5b 联网搜索检索参数（web_search / Tavily 调优）

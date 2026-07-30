@@ -32,9 +32,15 @@ async def get_time(timezone: str = ""):
 
 @tool(
     name="echo",
-    description="原样返回传入的文本，用于测试工具调用链路是否连通。",
+    description=(
+        "仅用于联调测试工具调用链路是否连通，返回会在文本前加 echo: 前缀。"
+        # 不要用它向用户输出东西，该工具不会在前端发声；
+        # 它只是调试用：检查请求 LLM 调工具 -> 后端执行 -> 结果回馈是否打通。
+    ),
     category=ToolCategory.SYSTEM,
-    permission=Permission.READ,
+    # dangerous：默认 read 权限下不会暴露给 LLM。避免 LLM 把它当作“说话工具”调用。
+    # 如需联调测试，手动设 TOOL_MAX_PERMISSION=dangerous 即可。
+    permission=Permission.DANGEROUS,
     parameters={
         "type": "object",
         "properties": {
