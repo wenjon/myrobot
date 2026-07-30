@@ -152,6 +152,27 @@ backend/tools/
 - `ENABLE_TOOLS`（默认 1）、`TOOL_MAX_ROUNDS`（默认 3）、`TOOL_MAX_PERMISSION`（默认 read）。
 - `TAVILY_API_KEY` / `TAVILY_URL`：联网搜索后端。
 
+### 10.5b 联网搜索检索参数（web_search / Tavily 调优）
+位置：`backend/tools/web/web_search.py`。这些参数决定「回喂给 LLM 的搜索内容有多全」，
+直接影响长文/要点类问答的质量，也影响模型是否会「嫌不完整而反复搜」。
+
+- `search_depth`（当前 `advanced`）：
+  - `basic`：只返回短摘要片段，快但内容少，长文（如古文全文）只能拿到开头。
+  - `advanced`：返回更长、更相关的正文片段，慢约 1~2 秒，但完整度明显更高。
+- `PER_ITEM_MAX`（当前 1500）：每条结果保留的正文字符上限。
+  之前为 300，导致长文被硬截断成开头片段，模型误判「没拿全」→ 换词反复搜直至轮次耗尽。
+- `TOTAL_MAX`（当前 6000）：所有结果合计字符上限，防止多条结果撑爆上下文预算
+  （需与 `MAX_CONTEXT_CHARS` 协调，避免工具结果挤占对话历史）。
+- `max_results`（由工具入参 `top_k` 控制，默认 5，最多 10）。
+
+调优经验：
+- 「反复搜同一主题」通常不是模型任性，而是回喂内容被截断/不足——优先调大 `PER_ITEM_MAX`
+  或提高 `search_depth`，而非只加大 `TOOL_MAX_ROUNDS`。
+- 长文全文（诗词/条款原文）本质不适合搜索工具，`advanced`+1500 也只能覆盖较长片段；
+  若要精确全文，宜内置「经典文本库」类工具。
+- 想更省 token/更快：回退 `basic` 并把 `PER_ITEM_MAX` 调到 500~800。
+- 想更全（消耗更大）：可加 Tavily `include_raw_content=true` 取网页原始正文。
+
 ### 10.6 扩展新工具的步骤
 1. 在 `tools/<分类>/` 新建 `.py`，用 `@tool(...)` 装饰函数或继承 `Tool` 类；
 2. 写清 `description`（何时用/不该用）与 `parameters`（JSON Schema）；
