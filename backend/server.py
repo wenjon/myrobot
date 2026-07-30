@@ -24,12 +24,13 @@ from fastapi.responses import RedirectResponse
 
 from config import (
     HOST, PORT, LLM_PROVIDER, OLLAMA_MODEL, ARK_MODEL, LOG_CONTEXT, CONTEXT_LOG_FILE,
-    SHOW_REAL_IP,
+    SHOW_REAL_IP, INTERRUPT_MODE,
 )
 from pipeline.llm_client import stream_chat, chat_once
 from pipeline.text_router import route
 from pipeline.conversation import ConversationManager
 from pipeline.agent import agent_stream
+from pipeline.turn_policy import classify_incoming
 from tools import REGISTRY, RESOURCES, load_all
 
 app = FastAPI(title="Robot Head Demo")
@@ -335,11 +336,41 @@ async def ws_endpoint(ws: WebSocket):
                 await ws.send_text(json.dumps({"type": "cleared"}, ensure_ascii=False))
                 continue
 
-            # ---- 普通用户消息：入队，交给 worker 顺序处理 ----
+            # ---- 普通用户消息：按轮次策略决定「继续说 / 打断 / 排队」----
             if mtype == "user_message":
                 text = (msg.get("text") or "").strip()
-                if text:
+                if not text:
+                    continue
+                busy = worker_current.get("cancel") is not None  # 数字人是否正在说
+
+                if INTERRUPT_MODE == "queue" or not busy:
+                    # 排队模式，或当前空闲：直接入队顺序处理（旧行为）。
                     await queue.put(text)
+                    continue
+
+                if INTERRUPT_MODE == "always":
+                    # 硬打断：任何新消息都立即中止当前播报，再处理新句。
+                    _emit(f"[轮次 #{conn_id}] always 打断当前播报，处理新消息: {text}")
+                    c = worker_current.get("cancel")
+                    if c:
+                        c.set()
+                    _drain_queue()
+                    await queue.put(text)
+                    continue
+
+                # smart 模式：先判断这句是「附和 / 打断 / 新提问」
+                kind = classify_incoming(text)
+                if kind == "backchannel":
+                    # 附和词（嗯/对/好的）：数字人正在说，不打断也不排队，只记录。
+                    _emit(f"[轮次 #{conn_id}] smart 判定为附和，继续说不打断: {text}")
+                    continue
+                # 打断词 或 新提问：中止当前轮 + 清队，再处理这句（barge-in）。
+                _emit(f"[轮次 #{conn_id}] smart 判定为 {kind}，打断当前播报并处理: {text}")
+                c = worker_current.get("cancel")
+                if c:
+                    c.set()
+                _drain_queue()
+                await queue.put(text)
     except WebSocketDisconnect:
         # 前端断开：走 finally 收尾
         pass

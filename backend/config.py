@@ -59,6 +59,12 @@ TOOL_MAX_PERMISSION = os.getenv("TOOL_MAX_PERMISSION", "read")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "REDACTED_TAVILY_API_KEY")
 TAVILY_URL = os.getenv("TAVILY_URL", "https://api.tavily.com/search")
 
+# ---- 轮次策略（数字人说话时又收到新消息怎么办）----
+# queue  = 排队，说完当前句再依次说（最稳，旧行为）
+# always = 硬打断，任何新消息都立即中止当前播报
+# smart  = 智能软打断（推荐）：附和词继续说，打断词/新提问才中止当前轮
+INTERRUPT_MODE = os.getenv("INTERRUPT_MODE", "smart")
+
 # ---- 上下文管理 ----
 # 滑动窗口保留最近 N 轮（1 轮 = user + assistant）
 MAX_TURNS = int(os.getenv("MAX_TURNS", "10"))
