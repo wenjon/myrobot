@@ -55,7 +55,8 @@ async def web_search(query: str, top_k: int = 5, ctx: ToolContext = None):
         "api_key": TAVILY_API_KEY,
         "query": query,
         "max_results": top_k,
-        "search_depth": "basic",
+        # advanced：返回更长、更相关的正文片段（比 basic 更全，稍慢）。
+        "search_depth": "advanced",
     }
     try:
         resp = await client.post(TAVILY_URL, json=payload)
@@ -71,12 +72,22 @@ async def web_search(query: str, top_k: int = 5, ctx: ToolContext = None):
     if not results:
         return ToolResult.success("没有搜索到相关结果。")
 
+    # 单条正文上限与总预算：放宽到能覆盖较长内容，同时限制总量避免撑爆上下文。
+    PER_ITEM_MAX = 1500   # 每条结果保留的正文字符上限
+    TOTAL_MAX = 6000      # 所有结果合计上限
     lines = []
+    used = 0
     for i, r in enumerate(results, 1):
         title = r.get("title", "无标题")
         content = (r.get("content") or "").strip().replace("\n", " ")
         url = r.get("url", "")
-        lines.append(f"{i}. {title}\n   摘要: {content[:300]}\n   链接: {url}")
+        snippet = content[:PER_ITEM_MAX]
+        if used + len(snippet) > TOTAL_MAX:
+            snippet = snippet[: max(0, TOTAL_MAX - used)]
+        used += len(snippet)
+        lines.append(f"{i}. {title}\n   内容: {snippet}\n   链接: {url}")
+        if used >= TOTAL_MAX:
+            break
     answer = data.get("answer")
     head = f"[搜索摘要] {answer}\n\n" if answer else ""
     return ToolResult.success(head + "搜索结果：\n" + "\n".join(lines),
