@@ -198,7 +198,11 @@ async def _run_dialog(ws: WebSocket, session, text: str, cancel: asyncio.Event):
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
 
-    session = None                       # 本连接绑定的会话，收到首条消息后确定
+    conn_id = uuid.uuid4().hex[:6]
+    peer = f"{ws.client.host}:{ws.client.port}" if ws.client else "?"
+    _emit(f"[WS #{conn_id}] 新连接来自 {peer}")
+
+    session = None                       # 本连接绑定的会话，收到 hello 后确定
     queue: asyncio.Queue = asyncio.Queue()  # 待处理的用户消息队列
     worker_current = {"cancel": None}    # 记录「当前正在处理的那轮」的打断信号
 
@@ -238,23 +242,31 @@ async def ws_endpoint(ws: WebSocket):
         while True:
             # ---- 接收并解析前端的一条 JSON 消息 ----
             raw = await ws.receive_text()
-            # ????????????????????????
-            # ???????????????????????/??????
-            _emit(f"[WS-RECV] {raw[:200]}")
+            # 原始帧日志：无论能否解析，都打印收到的原始内容，
+            # 用于区分「服务端根本没收到」还是「收到了但格式/类型不对」。
+            _emit(f"[WS-RECV #{conn_id}] {raw[:200]}")
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
-                _emit(f"[WS-RECV] JSON ??????????")
+                _emit(f"[WS-RECV #{conn_id}] JSON 解析失败，已忽略该帧")
                 continue
             mtype = msg.get("type")
 
-            # ---- 首条消息：绑定/新建会话，并启动 worker ----
-            # 前端会在连接建立后先发 hello（带 localStorage 里的 session_id）。
+            # ---- 会话绑定：只认 hello，绝不用其它帧来绑定会话 ----
+            # 关键隔离点：每个 WS 连接必须先发 hello 才能确定自己的会话；
+            # 这样心跳 ping / interrupt / clear 等无 session 字段的帧，
+            # 不会误触发「生成随机新会话」，也不会串到别的连接。
             if session is None:
-                sid = msg.get("session") or uuid.uuid4().hex
+                if mtype != "hello":
+                    _emit(f"[WS #{conn_id}] 未绑定会话前收到 {mtype!r}，已忽略，等待 hello")
+                    continue
+                sid = (msg.get("session") or "").strip() or uuid.uuid4().hex
                 session = conversations.get(sid)
+                had = bool((msg.get("session") or "").strip())
+                _emit(f"[WS #{conn_id}] 绑定会话 {sid[:8]}（客户端提供旧会话: {had}）")
                 await ws.send_text(json.dumps({"type": "session", "session": sid}, ensure_ascii=False))
                 worker_task = asyncio.create_task(worker())
+                continue
 
             # ---- 打断：中止当前这轮 + 清空排队 ----
             if mtype == "interrupt":
