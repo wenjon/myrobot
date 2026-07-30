@@ -298,3 +298,73 @@ async def lifespan(app: FastAPI):
 - 查看工具是否都加载了：`python -c "from tools import load_all, REGISTRY; load_all(); print([t.name for t in REGISTRY.all()])"`
 - 查看当前对 LLM 暴露了哪些工具：同上，加 `REGISTRY.schemas(max_permission=Permission.<level>)`
 - 查看服务是否在跳动：`netstat -ano | findstr :8000`（Windows）/`lsof -i :8000`（macOS/Linux）
+
+
+## 13. 配置项总览（config.py 全部环境变量）
+
+`backend/config.py` 里的所有环境变量。不设置时都使用默认值，多数场景不需要改。
+
+### 13.1 LLM 供应商（LLM_PROVIDER 切换）
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `LLM_PROVIDER` | `ark` | `ark`·火山引擎 Ark（OpenAI 兼容）或 `ollama`·本圻 |
+| `OLLAMA_URL` | `http://127.0.0.1:11434` | 本场 Ollama 服务地址 |
+| `OLLAMA_MODEL` | `gemma4:12b` | Ollama 上要拉起来的模型名 |
+| `ARK_BASE_URL` | `https://ark.cn-beijing.volces.com/api/coding/v3` | Ark 接口地址（OpenAI 兼容 `/chat/completions`） |
+| `ARK_API_KEY` | 硬编码在仓里 | 生成函数调用的凭证；生产可迁到 .env |
+| `ARK_MODEL` | `ark-code-latest` | Ark 上要用的模型 |
+
+### 13.2 分句与语言
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `SENTENCE_MIN_LEN` | `8` | 达到该长度后遇到次级标点（中英 `,;、`）才能切 |
+| `SENTENCE_MAX_LEN` | `24` | 不遇任何标点时超过该长度强切 |
+| `SYSTEM_PROMPT` | 默认小枡提示词 | 全部可覆盖，调人设定个性 |
+
+`STRONG_PUNCT` / `WEAK_PUNCT` 为内编码恒定集合，不发布为环境变量。
+
+### 13.3 服务地址与反代
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `HOST` | `127.0.0.1` | uvicorn 监听地址；仅本机访问请改 `0.0.0.0` |
+| `PORT` | `8000` | uvicorn 监听端口 |
+| `SHOW_REAL_IP` | `1` | `1`=信任 cloudflared 等反代转发头显示真实 IP；`0`=恒显示 127.0.0.1 |
+
+### 13.4 工具调用框架（tools）
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `ENABLE_TOOLS` | `1` | 总开关；`0` 则不调工具，走原有流式链路 |
+| `TOOL_MAX_ROUNDS` | `3` | 工具循环最多轮次，超过则强制进入「最终答」阶段，防无限调用 |
+| `TOOL_MAX_PERMISSION` | `read` | 可暴露给 LLM 的最高权限；可选 `read` / `write` / `dangerous`。`echo` 默认被 `dangerous` 阈门拦住，设为 `dangerous` 才会出现 |
+| `TAVILY_API_KEY` | 仓里硬编码 | 联网搜索；生产请搬到 .env |
+| `TAVILY_URL` | `https://api.tavily.com/search` | 搜索接口地址，一般不动 |
+
+### 13.5 对话轮次策略（INTERRUPT_MODE）
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `INTERRUPT_MODE` | `smart` | `queue`·排队依次说；`always`·任何新消息立即打断；`smart`·附和词继续说、打断词/新提问才 barge-in（推荐） |
+
+详见第 11 章。
+
+### 13.6 上下文管理（P0 + P1）
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `MAX_TURNS` | `10` | 滑动窗口保留的轮数（1 轮 = user+assistant） |
+| `MAX_CONTEXT_CHARS` | `4000` | 发给 LLM 的上下文总字符上限，超过则从头裁 |
+| `ENABLE_SUMMARY` | `1` | 是否启用「被裁掉的老历史 → 长期记忆摘要」 |
+| `SUMMARY_TRIGGER_CHARS` | `1200` | 被裁掉的那些历史累计超过该字数才触发压缩为摘要 |
+| `SESSION_TTL` | `3600` | 会话空闲多少秒后回收，避免内存滥用 |
+
+### 13.7 调试日志
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `LOG_CONTEXT` | `1` | `0` 关闭上下文日志（控制台不打印，文件不写） |
+| `CONTEXT_LOG_FILE` | `backend/logs/context.log` | 日志文件路径；设为空串则只输出控制台 |
+
+### 13.8 三套环境供选型常见问题
+- 本机不能访问 Ark：`LLM_PROVIDER=ollama` 切回本场模型。
+- 不想联网：`ENABLE_TOOLS=0`，同时可以从 system prompt 移除「优先联网」那句。
+- 查看工具调用详情：保持 `LOG_CONTEXT=1`，在控制台会看到 `[工具 #<conn> 调用 <name> 参数=...` 这样的行。
+- 会话污染内存：`SESSION_TTL=600`、`MAX_TURNS=6`、`ENABLE_SUMMARY=1` 三者联动。
+- 联调 echo 工具：`TOOL_MAX_PERMISSION=dangerous`，同时设 `ENABLE_TOOLS=1`。
+- 手机外网访问：`SHOW_REAL_IP=1` + cloudflared 代理（端口是 8000）。
