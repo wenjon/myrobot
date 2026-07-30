@@ -33,35 +33,28 @@ from pipeline.agent import agent_stream
 from pipeline.turn_policy import classify_incoming
 from tools import REGISTRY, RESOURCES, load_all
 
+# server_app 拆出的业务辅助模块：
+#   - logging：控制台+文件日志器
+#   - peers：WS 客户端地址格式化
+#   - dialog：单轮对话主循环
+#   - notify：服务端主动下发辅助消息（如 interrupted）
+from server_app.dialog import run_dialog as _run_dialog_real
+from server_app.logging import get_logger
+from server_app.notify import notify_interrupted as _notify_interrupted
+from server_app.peers import format_peer
+
 app = FastAPI(title="Robot Head Demo")
 # 全局唯一的会话管理器：按 session_id 维护每个用户的多轮历史。
 conversations = ConversationManager()
 
 
 # =====================================================================
-# 上下文日志：把「发给 LLM 的上下文」和「模型输出」同时打到控制台 + 文件
-# 由 config 的 LOG_CONTEXT / CONTEXT_LOG_FILE 控制，方便排查上下文问题。
+# 全局初始化：日志器 -> 工具框架
 # =====================================================================
-_log_fh = None  # 日志文件句柄；打开失败或未启用时为 None
-if LOG_CONTEXT and CONTEXT_LOG_FILE:
-    try:
-        # 确保日志目录存在，再以追加模式打开
-        os.makedirs(os.path.dirname(CONTEXT_LOG_FILE), exist_ok=True)
-        _log_fh = open(CONTEXT_LOG_FILE, "a", encoding="utf-8")
-    except Exception as e:  # noqa: BLE001
-        print(f"[warn] 无法打开上下文日志文件: {e}")
-        _log_fh = None
-
-
-def _emit(line: str):
-    """统一输出一行日志：控制台 print + 写文件（若启用）。"""
-    if not LOG_CONTEXT:
-        return
-    print(line, flush=True)
-    if _log_fh:
-        _log_fh.write(line + "\n")
-        _log_fh.flush()  # 立即落盘，保证前台 tail 时能实时看到
-
+# 起动日志器（控制台 + 可选文件）。
+LOGGER = get_logger()
+LOGGER.init()
+_emit = LOGGER.emit  # 保留本名以便迁移阶段少改动原有代码
 
 # 工具框架接入日志系统，并在启动时自动发现/加载所有工具。
 REGISTRY.set_logger(_emit)
@@ -69,54 +62,9 @@ _loaded_tools = load_all(_emit)
 _emit(f"[启动] 已加载工具: {[t.name for t in REGISTRY.all()]}")
 
 
-def _log_context(session, messages, user_text, who=""):
-    """打印本轮「真实发送给 LLM 的完整上下文」，用于核对多轮记忆是否正确。
-
-    who: 连接标识前缀（如 "#a1b2c3 127.0.0.1:54321"），用于区分是哪个客户端。
-    """
-    ts = datetime.now().strftime("%H:%M:%S")
-    lines = ["\n" + "=" * 70,
-             f"[{ts}][{who}][会话 {session.id[:8]}] 用户输入: {user_text}",
-             f"[发送给 LLM 的上下文 · 共 {len(messages)} 条 · "
-             f"约 {sum(len(m['content']) for m in messages)} 字]"]
-    # 逐条列出 system / 历史 user / 历史 assistant / 本轮 user
-    for i, m in enumerate(messages):
-        role = {"system": "系统", "user": "用户", "assistant": "小柚"}.get(m["role"], m["role"])
-        content = m["content"].replace("\n", " ")
-        # 过长内容截断显示，避免刷屏
-        if len(content) > 200:
-            content = content[:200] + f"…(+{len(m['content']) - 200}字)"
-        lines.append(f"  {i:>2}. [{role}] {content}")
-    if session.summary:
-        lines.append(f"[当前记忆摘要] {session.summary}")
-    lines.append("-" * 70)
-    _emit("\n".join(lines))
-
-
-def _log_output(session, assistant_raw, note="", who=""):
-    """打印本轮模型输出（note 用于标注「被打断」等状态，who 为连接标识前缀）。"""
-    ts = datetime.now().strftime("%H:%M:%S")
-    _emit(f"[{ts}][{who}][会话 {session.id[:8]}] 模型输出{note}: {assistant_raw.strip()}\n" + "=" * 70)
-
-
 def _fmt_peer(ws) -> str:
-    """把客户端地址格式化成便于阅读的字符串。
-
-    - SHOW_REAL_IP=0：恒显示本机回环 127.0.0.1:<端口>（永远 IPv4）；
-    - IPv6 的 v4-映射地址 ::ffff:1.2.3.4 → 还原成纯 IPv4；
-    - 纯 IPv6 → 用 [] 包裹，避免和端口冒号混淆。
-    """
-    if not ws.client:
-        return "?"
-    host = ws.client.host
-    port = ws.client.port
-    if not SHOW_REAL_IP:
-        return f"127.0.0.1:{port}"
-    if host.startswith("::ffff:") and "." in host:
-        host = host.split("::ffff:")[-1]  # v4-映射地址还原为纯 IPv4
-    elif ":" in host:
-        host = f"[{host}]"                 # 纯 IPv6 加方括号
-    return f"{host}:{port}"
+    """薄包装：转发到 server_app.peers.format_peer。"""
+    return format_peer(ws)
 
 
 # 前端静态资源目录（与 backend 同级的 frontend/）
@@ -140,129 +88,23 @@ async def health():
 
 
 # =====================================================================
-# 单轮对话核心：LLM 流式 → 中央调度 → WS 推送，并做上下文安全提交
+# 单轮对话主循环已迁出到 server_app/dialog.py（run_dialog）。
+# 为避免外部调用大量改名，保留本名薄包装。
 # =====================================================================
-async def _run_dialog(ws: WebSocket, session, text: str, cancel: asyncio.Event, who: str = ""):
-    """处理一轮对话。
-
-    参数:
-        ws:      WebSocket 连接，用于把结果推给前端。
-        session: 该用户的会话对象（持有历史/摘要）。
-        text:    本轮用户输入。
-        cancel:  打断信号；一旦被 set，就尽快停止本轮。
-
-    上下文提交规则（关键）：
-        - 正常结束 → 把 user + 清洗后的 assistant 一起写入历史；
-        - 被打断且已说了部分 → 记录已说部分并标注「被打断」；
-        - 被打断且啥都没说 / 出错 → 回滚本轮 user，避免留下「孤儿」消息。
-    """
-    # 1) 开启新一轮，并组装本轮真正要发给 LLM 的消息（system + 窗口历史 + 本轮 user）
-    session.begin_turn(text)
-    messages = session.build_messages(text)
-    _log_context(session, messages, text, who)
-
-    assistant_text = []   # 收集模型完整输出（含动作标记，用于日志/入库）
-    produced = False      # 是否已向前端产出过至少一句（用于打断时判断）
-
-    async def _emit_status(text: str):
-        """把工具执行状态推给前端（如“正在联网搜索…”），让数字人显示提示。"""
-        try:
-            await ws.send_text(json.dumps({"type": "status", "text": text}, ensure_ascii=False))
-        except Exception:
-            pass
-
-    async def token_stream():
-        """经 Agent（含工具调用）产出最终答案 token；收到打断信号就停。"""
-        async for tok in agent_stream(
-            messages,
-            session_id=session.id,
-            conn_id=who.split()[0].lstrip('#') if who else '',
-            cancel=cancel,
-            emit_status=_emit_status,
-            log_fn=_emit,
-        ):
-            if cancel.is_set():
-                break
-            assistant_text.append(tok)
-            yield tok
-
-    # 2) 让中央调度消费 token 流，产出「整句」与「动作指令」，分别推给前端
-    seq = 0  # 句子序号，前端可用于排序
-    try:
-        async for event in route(token_stream()):
-            if cancel.is_set():
-                break
-            if event["type"] == "sentence":
-                produced = True
-                await ws.send_text(json.dumps(
-                    {"type": "sentence", "text": event["text"], "seq": seq},
-                    ensure_ascii=False,
-                ))
-                seq += 1
-            elif event["type"] == "action":
-                # 表情/动作指令：提前下发，让前端表情与语音同步
-                await ws.send_text(json.dumps(
-                    {"type": "action", "action": event["action"], "value": event["value"]},
-                    ensure_ascii=False,
-                ))
-    except Exception as e:  # noqa: BLE001
-        # LLM/网络等异常：回滚本轮，并把错误告知前端
-        session.rollback_turn()
-        _log_output(session, f"[出错] {e}", who=who)
-        try:
-            await ws.send_text(json.dumps({"type": "error", "message": str(e)}, ensure_ascii=False))
-        except Exception:
-            pass
-        return
-
-    # 3) 被打断的收尾处理
-    if cancel.is_set():
-        partial = "".join(assistant_text).strip()
-        if produced and partial:
-            # 已经说了半句：记入历史并标注，保持上下文连贯
-            _log_output(session, partial, "（被打断）", who=who)
-            session.commit_turn(partial + "（被打断）")
-        else:
-            # 还没开口就被打断：直接回滚，不留半截记录
-            session.rollback_turn()
-            _log_output(session, "(打断，无产出，已回滚)", who=who)
-        return
-
-    # 4) 正常结束：写入历史 + 通知前端本轮结束
-    _log_output(session, "".join(assistant_text), who=who)
-    session.commit_turn("".join(assistant_text))
-    await ws.send_text(json.dumps({"type": "llm_done"}, ensure_ascii=False))
-
-    # 5) 视情况把被裁掉的旧历史压缩成「记忆摘要」（长期记忆，不阻塞主流程）
-    try:
-        await conversations.maybe_summarize(session, chat_once)
-    except Exception:
-        pass
-
-
-# =====================================================================
-# 自然收尾：自动打断（barge-in）时通知前端做人性化收尾
-# =====================================================================
-async def _notify_interrupted(ws: WebSocket, reason: str = ""):
-    """告知前端“这是自动打断”，让它做自然收尾。
-
-    与“手动点击打断按钮”（mtype==interrupt）区分：
-    手动打断是用户主动要求立即安静，不需要渐弱/倾听表情；
-    而自动 barge-in（always / smart 判定为提问或打断词）是“我听到你又说话了”，
-    体验上应该像真人一样把声音渐弱、换上“我在听”的倾听表情。
-    """
-    try:
-        await ws.send_text(json.dumps(
-            {"type": "interrupted", "reason": reason},
-            ensure_ascii=False,
-        ))
-    except Exception:
-        pass
+async def _run_dialog(ws, session, text, cancel, who=""):
+    """薄包装：转发到 server_app.dialog.run_dialog。"""
+    return await _run_dialog_real(ws, session, text, cancel, who)
 
 
 # =====================================================================
 # WebSocket 端点：接收前端消息，用「队列 + 单 worker」保证顺序处理
 # =====================================================================
+# ---------------------------------------------------------------------
+# WS 协议总览（完整定义见 docs/.../05_*）：
+#   C -> S: hello / user_message / interrupt / clear / ping
+#   S -> C: session / sentence / action / status / llm_done / error / cleared / interrupted
+# 连接生命周期： accept -> 绑定会话 -> 开 worker -> 处理 -> 优雅关闭
+# ---------------------------------------------------------------------
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
