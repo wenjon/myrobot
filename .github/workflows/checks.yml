@@ -21,9 +21,9 @@ jobs:
     name: Python 语法检查
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           # 跟本机开发环境（Python 3.12）保持一致
           python-version: '3.12'
@@ -50,9 +50,9 @@ jobs:
     name: 密钥硬编码扫描
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -68,11 +68,11 @@ jobs:
     name: 前端 JS 语法检查
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: node --check 自写模块
         # 只检自己写的模块；three.module.js / GLTFLoader.js / BufferGeometryUtils.js
