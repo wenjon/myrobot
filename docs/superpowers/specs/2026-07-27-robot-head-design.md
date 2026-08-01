@@ -427,3 +427,56 @@ python backend\server.py
 
 入库文件仅 30+ 个（`git ls-files` 可核对）：`backend/` 源码、`frontend/`（含 2.7MB `avatar.glb`）、
 `docs/`、`README.md`。`.venv/`、`__pycache__/`、`.idea/`、`logs/`、`*.log`、`.env` 均已忽略。
+
+## 15. 持续集成（GitHub Actions 静态检查）
+
+### 15.1 为什么需要
+
+开发模式是「本机改 → 提交 → 换台机器接着改」，此时有两个真实风险：
+
+1. **编码事故**：本项目的 `.py` 含大量中文注释且多数由脚本生成（PowerShell 下写中文文件坑很多）。
+   若某次写入弄坏了缩进或编码，要等到下次真正 `python server.py` 才暴露；
+   而那时可能已经推上去、另一台机器已经 clone 了一份坏代码。
+2. **密钥回流**：第 14 章刚把硬编码密钥清洗干净，但谁都可能为了调试方便又把 key 直接写回 `config.py`。
+
+### 15.2 三个 job
+
+配置在 `.github/workflows/checks.yml`，触发时机：`push` 到 master / 任意 PR / 手动触发。
+
+| job | 做什么 | 能抳到的问题 |
+|---|---|---|
+| `python-syntax` | `compileall -q backend/ scripts/` + 关键模块真实 `import` | 语法错、缩进错、编码错、循环引用、笔误的模块名 |
+| `secret-scan` | 跑 `scripts/check_no_hardcoded_secrets.py` | 密钥被硬编码回代码 |
+| `js-syntax` | `node --check` 校验 5 个自写前端模块 | 前端 JS 语法错 |
+
+`compileall` 之后额外做一次 `import config, pipeline.text_router, pipeline.turn_policy, tools`：
+编译通过只说明语法合法，真正 import 才能抳到循环引用与写错的模块路径。
+注意 **不导入 `server.py`** —— 它在模块层面就会初始化日志、加载工具，属于运行时行为，不该在静态检查里做。
+
+### 15.3 刻意保持的边界
+
+- **不需要任何 API Key**：三个 job 全是静态检查，不启服务、不请求 Ark / Tavily，
+  因此**无需配置 GitHub Secrets**，也不会因为额度或网络抢错。
+- **不做端到端测试**：真要验证对话链路得把密钥配成 Secrets 并调真模型，对 demo 阶段是过度设计。
+- **不检三方库**：`three.module.js` / `GLTFLoader.js` / `BufferGeometryUtils.js` 是 vendored 依赖，不归本仓库维护。
+- **额度**：private 仓库每月 2000 分钟免费，本工作流单次几十秒，实际用不完。
+
+### 15.4 密钥扫描器的误报权衡
+
+`scripts/check_no_hardcoded_secrets.py` 的原则是**宁可漏报也不误报**（误报会让人开始忽视 CI）。两层规则：
+
+1. **厂商特征前缀**：`tvly-` / `sk-` / `ghp_` 等，命中几乎必定是真密钥；
+2. **可疑赋值结构**：`*_API_KEY / *_TOKEN / *_SECRET / *_PASSWORD` 后面跟了个长度 ≥ 8 的非空字面量。
+
+以下情况被显式判为安全：空字符串默认值、`REDACTED_*` 占位符、`your-` / `YOUR_` / `xxx` / `<...>` / `${...}` 模板占位、
+以及全大写字面量（避开 `os.getenv("TAVILY_API_KEY", "")` 里把变量名本身误捕的情况）。
+
+扫描范围用 `git ls-files` 取得，因此**天然排除** `.env` / `.venv/` / `__pycache__/`（都在 `.gitignore` 里），
+也跳过二进制文件如 `avatar.glb`。本机随时可手动跑：
+
+```powershell
+python scripts/check_no_hardcoded_secrets.py
+# OK：已扫描 35 个跟踪文件，未发现硬编码密钥。
+```
+
+> 该脚本已做过正/负向验证：正常仓库返回 0；人为写入一个 `tvly-dev-...` 假密钥后准确定位到 `backend/config.py` 行号并返回 1。

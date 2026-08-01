@@ -5,6 +5,19 @@
 
 链路：`文本/语音输入 → (ASR) → LLM(Ollama) → 文本解析中央调度 → TTS(Web Speech) → 2D 口型/表情`
 
+## 本地自检
+
+推送前可以先本机跑一遗（与 CI 完全一致的三项检查）：
+
+```powershell
+python -m compileall -q backend/ scripts/          # Python 语法
+python scripts/check_no_hardcoded_secrets.py       # 密钥硬编码扫描
+node --check frontend/src/main.js                  # 前端 JS 语法
+```
+
+每次 `git push` 后 GitHub Actions 会自动跑同样的检查（`.github/workflows/checks.yml`），
+全是静态检查、**不需要配置任何 Secrets**。详见 docs 第 15 章。
+
 ## 密钥配置（换机器必做）
 
 仓库**不包含任何 API Key**。首次在一台新机器上跑，需要自己建 `.env`：

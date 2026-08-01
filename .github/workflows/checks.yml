@@ -1,0 +1,85 @@
+# GitHub Actions：轻量静态检查
+#
+# 目的：每次 push / PR 自动验一下代码能不能编译、密钥有没有被写回代码，
+#       避开「在另一台机器 clone 下来才发现是坏的」。
+# 边界：只做静态检查——不启动服务、不请求 LLM、不需要任何 API Key，
+#       所以不必配置 GitHub Secrets，跑得快也不花额度。
+name: checks
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  # 允许在 Actions 页面手动触发
+  workflow_dispatch:
+
+jobs:
+  # ------------------------------------------------------------------
+  # Job 1: 语法编译——把 backend/ 下所有 .py 编译一遗
+  # ------------------------------------------------------------------
+  python-syntax:
+    name: Python 语法检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # 跟本机开发环境（Python 3.12）保持一致
+          python-version: '3.12'
+
+      - name: compileall backend/
+        # -q 只报错；任何语法/缩进/编码错误都会让退出码非 0。
+        # 本项目的 .py 含大量中文注释且由脚本生成，这一步正是为了卡住编码事故。
+        run: python -m compileall -q backend/ scripts/
+
+      - name: 关键模块可导入自检
+        # 比 compileall 更进一步：真正 import 一次，能抳到循环引用 / 笔误的模块名。
+        # 不导入 server.py（它会初始化日志与工具，属于运行时行为）。
+        working-directory: backend
+        run: |
+          pip install -q -r requirements.txt
+          python -c "import config, pipeline.text_router, pipeline.turn_policy, tools; print('imports ok')"
+
+  # ------------------------------------------------------------------
+  # Job 2: 密钥硬编码扫描
+  # ------------------------------------------------------------------
+  # 本项目曾把 ARK/TAVILY 密钥写在 config.py 默认值里，为推送 GitHub 做过一次
+  # 历史重写（docs 第 14 章）。这个 job 用来防止同样的坑再踩一次。
+  secret-scan:
+    name: 密钥硬编码扫描
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 扫描跟踪文件
+        # 同一个脚本本机也能跑：
+        #   python scripts/check_no_hardcoded_secrets.py
+        run: python scripts/check_no_hardcoded_secrets.py
+
+  # ------------------------------------------------------------------
+  # Job 3: 前端 JS 语法检查
+  # ------------------------------------------------------------------
+  js-syntax:
+    name: 前端 JS 语法检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: node --check 自写模块
+        # 只检自己写的模块；three.module.js / GLTFLoader.js / BufferGeometryUtils.js
+        # 是直接 vendored 的三方库，不归我们维护，排除。
+        # --check 只验语法，不执行（这些文件依赖浏览器 API，在 node 里跑不起来）。
+        run: |
+          for f in frontend/src/main.js frontend/src/ws.js frontend/src/tts.js frontend/src/viseme.js frontend/src/head3d.js; do
+            echo "checking $f"
+            node --check "$f"
+          done
