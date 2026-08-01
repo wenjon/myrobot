@@ -1,5 +1,34 @@
-﻿"""Demo 配置。可通过环境变量覆盖。"""
+"""Demo 配置。可通过环境变量或仓库根目录的 .env 文件覆盖。
+
+约定：
+  1. 任何密钥（API Key）都不写死在代码里，只从环境变量 / .env 读取；
+     .env 已被 .gitignore 忽略，换机器时照着 .env.example 重新填一份即可。
+  2. 其余非敏感参数保留可读的默认值，方便开箱即跑。
+"""
 import os
+from pathlib import Path
+
+# ---- .env 极简加载器 ----
+# 只做最小实现（KEY=VALUE / # 注释 / 可选引号），避免为 demo 引入 python-dotenv 依赖。
+# 已存在的真实环境变量优先级更高，不会被 .env 覆盖。
+_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+
+
+def _load_env_file(path: Path = _ENV_FILE) -> None:
+    if not path.is_file():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        # setdefault 语义：外部已显式导出的环境变量优先
+        os.environ.setdefault(key, value)
+
+
+_load_env_file()
 
 # ---- LLM 供应商切换 ----
 # provider = "ark"（火山引擎 Ark，OpenAI 兼容）或 "ollama"（本地）
@@ -11,7 +40,8 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:12b")
 
 # 火山引擎 Ark（OpenAI 兼容 /chat/completions）
 ARK_BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/coding/v3")
-ARK_API_KEY = os.getenv("ARK_API_KEY", "REDACTED_ARK_API_KEY")
+# 密钥不落代码：从环境变量 / .env 读取，缺失时为空字符串（启动时会给出提示）
+ARK_API_KEY = os.getenv("ARK_API_KEY", "")
 ARK_MODEL = os.getenv("ARK_MODEL", "ark-code-latest")
 
 # 智能分句参数
@@ -60,7 +90,7 @@ TOOL_MAX_ROUNDS = int(os.getenv("TOOL_MAX_ROUNDS", "3"))
 TOOL_MAX_PERMISSION = os.getenv("TOOL_MAX_PERMISSION", "read")
 
 # 联网搜索（Tavily）
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "REDACTED_TAVILY_API_KEY")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 TAVILY_URL = os.getenv("TAVILY_URL", "https://api.tavily.com/search")
 
 # ---- 轮次策略（数字人说话时又收到新消息怎么办）----

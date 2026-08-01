@@ -1,4 +1,4 @@
-﻿"""FastAPI + WebSocket 服务：机器人头部对话的服务端编排。
+"""FastAPI + WebSocket 服务：机器人头部对话的服务端编排。
 
 职责概览：
 - 提供 WebSocket 端点 /ws，承载「全链路流式」对话；
@@ -79,6 +79,24 @@ _emit = LOGGER.emit  # 保留本名以便迁移阶段少改动原有代码
 REGISTRY.set_logger(_emit)
 _loaded_tools = load_all(_emit)
 _emit(f"[启动] 已加载工具: {[t.name for t in REGISTRY.all()]}")
+
+
+def _check_secrets() -> None:
+    """启动自检：密钥已从代码中移除，换机器后必须自己填 .env。
+
+    只做提示不阻断启动：没有 Tavily key 也能聊天，只是不能联网搜索；
+    没有 Ark key 则可以把 LLM_PROVIDER 改成 ollama 跑本地模型。
+    """
+    from config import ARK_API_KEY, TAVILY_API_KEY
+
+    if LLM_PROVIDER == "ark" and not ARK_API_KEY:
+        _emit("[启动][警告] LLM_PROVIDER=ark 但 ARK_API_KEY 为空："
+              "请将 .env.example 复制为 .env 并填入密钥，或改用 LLM_PROVIDER=ollama。")
+    if not TAVILY_API_KEY:
+        _emit("[启动][提示] TAVILY_API_KEY 未配置，web_search 联网搜索将不可用。")
+
+
+_check_secrets()
 
 
 def _fmt_peer(ws) -> str:

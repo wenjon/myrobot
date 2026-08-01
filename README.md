@@ -1,9 +1,42 @@
-﻿# myrobot — 机器人头部交互式对话（软件模拟 Demo）
+# myrobot — 机器人头部交互式对话（软件模拟 Demo）
 
 基于《机器人头部交互式对话全链路技术方案（流式低延迟架构正式版）》的**纯软件模拟**实现。
 无需物理零件，用浏览器里的 2D 虚拟头替代物理伺服头部，跑通全链路流式对话。
 
 链路：`文本/语音输入 → (ASR) → LLM(Ollama) → 文本解析中央调度 → TTS(Web Speech) → 2D 口型/表情`
+
+## 密钥配置（换机器必做）
+
+仓库**不包含任何 API Key**。首次在一台新机器上跑，需要自己建 `.env`：
+
+```powershell
+# 仓库根目录
+copy .env.example .env
+# 然后编辑 .env，填入 ARK_API_KEY（火山引擎）和 TAVILY_API_KEY（联网搜索，可留空）
+```
+
+- `.env` 已被 `.gitignore` 忽略，永远不会被提交。
+- `backend/config.py` 启动时自动读取根目录 `.env`；**已导出的真实环境变量优先级更高**。
+- 服务启动时会自检：缺 `ARK_API_KEY` 或 `TAVILY_API_KEY` 会在控制台打印警告，但不阻断启动。
+- 完全不想用云端 LLM？把 `.env` 里改成 `LLM_PROVIDER=ollama` 即可走本地模型，无需任何密钥。
+
+## 在另一台机器上继续开发
+
+```powershell
+git clone <你的仓库地址> myrobot
+cd myrobot
+copy .env.example .env      # 填入密钥
+pip install -r backend/requirements.txt
+python backend\server.py
+# 浏览器打开 http://127.0.0.1:8000/app/index.html
+```
+
+需要手机/外网访问时，用 Cloudflare 快速隧道把 8000 端口暴露出去（WS 与 HTTP 共用同一域名，前端会按页面协议自动选 `ws`/`wss`）：
+
+```powershell
+cloudflared tunnel --url http://127.0.0.1:8000
+# 访问输出的 https://xxx.trycloudflare.com/app/index.html
+```
 
 ## 依赖
 - **Ollama**（本地已运行，默认模型 `gemma3:12b`）

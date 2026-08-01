@@ -6,3 +6,7 @@
 node_modules/
 backend/logs/
 context.log
+
+# 本机密钥与私有配置（.env.example 是可提交的模板）
+.env
+.env.local

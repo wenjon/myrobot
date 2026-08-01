@@ -1,4 +1,4 @@
-﻿# 机器人头部交互式对话 — 软件模拟 Demo 设计规格
+# 机器人头部交互式对话 — 软件模拟 Demo 设计规格
 
 - 状态: Draft (Demo)
 - 日期: 2026-07-27
@@ -368,3 +368,62 @@ async def lifespan(app: FastAPI):
 - 会话污染内存：`SESSION_TTL=600`、`MAX_TURNS=6`、`ENABLE_SUMMARY=1` 三者联动。
 - 联调 echo 工具：`TOOL_MAX_PERMISSION=dangerous`，同时设 `ENABLE_TOOLS=1`。
 - 手机外网访问：`SHOW_REAL_IP=1` + cloudflared 代理（端口是 8000）。
+
+## 14. 密钥管理与仓库协作（secrets / repo hygiene）
+
+### 14.1 为什么改
+
+此前 `ARK_API_KEY`、`TAVILY_API_KEY` 直接硬编码在 `backend/config.py` 的 `os.getenv` 默认值里。
+这在单机 demo 阶段方便，但一旦仓库要推到 GitHub（哪怕 private）就有两个问题：
+
+1. **明文泄露**：任何拿到仓库的人（含未来的协作者、CI 日志、误设为 public）都能直接用你的额度。
+2. **历史残留**：删掉当前文件里的 key 没用，`git log -S <key>` 仍能从旧 commit 里翻出来。
+
+### 14.2 方案：.env + 极简加载器
+
+| 文件 | 是否入库 | 作用 |
+|---|---|---|
+| `.env` | ❌（`.gitignore` 忽略） | 本机真实密钥，每台机器各自维护 |
+| `.env.example` | ✅ | 模板：列出所有键名 + 注释 + 申请地址，值留空 |
+| `backend/config.py` | ✅ | 启动时读 `.env`，密钥默认值改为 `""` |
+
+`config.py` 里的 `_load_env_file()` 是**不引入 python-dotenv 依赖**的最小实现：
+
+- 只解析 `KEY=VALUE`，跳过空行与 `#` 注释，自动去掉值两侧引号；
+- 用 `os.environ.setdefault()` 写入 —— 即**已显式导出的真实环境变量优先级高于 `.env`**，
+  这样临时切模型可以直接 `$env:LLM_PROVIDER="ollama"` 而不用改文件；
+- `.env` 不存在时静默跳过，不影响纯环境变量部署（Docker / systemd）。
+
+### 14.3 启动自检
+
+`server.py` 的 `_check_secrets()` 在加载完工具后运行，**只提示不阻断**：
+
+- `LLM_PROVIDER=ark` 且 `ARK_API_KEY` 为空 → 警告并提示可改用 `ollama`；
+- `TAVILY_API_KEY` 为空 → 提示 `web_search` 不可用（其余链路照常）。
+
+设计原则：缺密钥应该给出**人能读懂的一行提示**，而不是等到第一次对话时抛 401 堆栈。
+
+### 14.4 历史清洗
+
+旧 commit 里的明文 key 用「`git fast-export` → 流内字节替换 → `git fast-import` 到新仓库」
+的方式整体重写，明文被替换为 `REDACTED_ARK_API_KEY` / `REDACTED_TAVILY_API_KEY` 占位符。
+
+选这条路而非 `git filter-repo` / `filter-branch` 的原因：本机无法访问 PyPI 安装 `git-filter-repo`，
+而 `filter-branch` 依赖 Git Bash 的 `cat`/`git-sh-setup`，在当前 PowerShell 沙箱下 PATH 传递不可靠。
+`fast-export | fast-import` 只需 git 本体 + Python，跨平台稳定。
+
+> ⚠️ 重要：历史重写会改变**所有 commit 的 SHA**。若已有其他克隆，需重新 clone 或 `git reset --hard origin/master`。
+> 另外，**密钥一旦进过 git 就应视为已泄露**，最稳妥的做法仍是去控制台**重新签发一份新 key**。
+
+### 14.5 换机器开发流程
+
+```powershell
+git clone <repo> myrobot
+cd myrobot
+copy .env.example .env        # 填入自己的 ARK_API_KEY / TAVILY_API_KEY
+pip install -r backend/requirements.txt
+python backend\server.py
+```
+
+入库文件仅 30+ 个（`git ls-files` 可核对）：`backend/` 源码、`frontend/`（含 2.7MB `avatar.glb`）、
+`docs/`、`README.md`。`.venv/`、`__pycache__/`、`.idea/`、`logs/`、`*.log`、`.env` 均已忽略。
