@@ -480,3 +480,168 @@ python scripts/check_no_hardcoded_secrets.py
 ```
 
 > 该脚本已做过正/负向验证：正常仓库返回 0；人为写入一个 `tvly-dev-...` 假密钥后准确定位到 `backend/config.py` 行号并返回 1。
+
+## 16. Agent 记忆模块设计（分层 · 沉淀 · 检索）
+
+### 16.1 为什么一个 Agent 需要记忆
+
+没有记忆的 Agent 跟每次都是「第一次见面」的人类一样：他会忘记你五分钟前说过的偏好，
+反复犯同一个错，每次开机都要重新介绍自己。
+记忆模块的设计水平，决定了 Agent 是“能用”还是“好用”。
+
+本章参考《小红书大模型二面：Agent 记忆模块设计》的「四类记忆 × 三层存储 × 三维检索 × 反思提炼」框架，
+但给本项目做了适配：单用户需求 / 本地 + 云端 LLM / 不上向量数据库。
+
+### 16.2 四类记忆与本项目的对应
+
+| 类型 | 是什么 | 在本项目中的实现 | 生命周期 |
+|---|---|---|---|
+| **工作记忆** Working | 当前任务正在处理的上下文：推理中间态、本轮工具返回 | LLM 上下文窗口（每次调用重新组装） | 一轮 |
+| **情景记忆** Episodic | 过去发生过的具体事件：「上周帮你查过机票」「你一开始叫上帝」 | 会话的渐进历史（`Session.history`）+被裁减的測试缓冲（`Session.dropped_buffer`） | 会话期内（TTL） |
+| **语义记忆** Semantic | 从事件中提炼出的通用知识：「你喜欢简洁风格」「你偏好靠窗座位」 | 会话摘要 + 用户画像（`Session.summary` 与新增的 `UserProfile`） | 持久（含存盘） |
+| **程序记忆** Procedural | 固化的操作流程：「处理退款的标准流程是……」 | 系统提示词 + 工具注册表（`tools/REGISTRY`） | 随项目升级（本身不变） |
+
+上表中三个点需要重点说明：
+
+- **工作记忆不是一个独立存储**，它是「每次调 LLM 时重新拼出来的上下文」。沉丝成本为零。
+- **情景记忆会沉淀成语义记忆**，这是反思机制在做的事（详见 16.6）。
+- **程序记忆在本项目中几乎全部位于提示词与工具注册表**，独立抽出这一层是为了未来能在这里加 SOP 文件与动态加载。
+
+### 16.3 三层存储（取舍向量数据库）
+
+原文以 L1=Context / L2=Redis / L3=Vector DB+PostgreSQL 为例，对本项目过重，
+采用「轻量等价品」：
+
+| 层 | 原文抽象 | 本项目实现 | 何时升级 |
+|---|---|---|---|
+| L1 工作层 | LLM Context Window | 每轮重新拼接的 `messages` 列表 | 不需升级 |
+| L2 会话缓存层 | Redis、过期机制 | `ConversationManager` 中的 `Session` 对象 + JSON 磁盘持久化 | 单机跨重启 |
+| L3 长期记忆层 | 向量库 + 结构化存储 | 会话摘要与用户画像合并为一个 `long_term.json`，不上向量 | 当记忆超过 50 个会话 或 用户人为提出「记住 XXX」 |
+
+**为什么不一开始就上向量库？**
+
+- 当前只有**一个用户**，且记忆完全被 1 个 summary + profile 能覆盖，检索不是瓶颈。
+- 向量化 + 依赖接入 embedding 服务，增加了「embedding 质量不稳、需要冷启动、多层缓存」等问题，对 demo 阶段价价比偏低。
+- 设计上保留接口：`memory.retrieval` 模块遵循同一个 `MemoryQuery` 接口，未来换向量库只是换一个实现。
+
+### 16.4 单轮对话中记忆是怎么拼的
+
+```
+[系统]  小枥的人设与口头禄（程序记忆的主体）              ← 常驻
+[系统·贴片] 「你喜欢简洁风格」「你是 某某 公司的 CTO」  ← L3 语义记忆（profile）
+[系统·贴片] 上次聊过什么（summary）                       ← L3 会话摘要
+[user]    上下文中的某句话                                   ← L2 情景记忆（滑动窗口）
+[assistant] 上下文中的某句答复
+[user]    …
+[assistant] …
+[user]    【当前轮】你好说谁呢？                          ← 工作记忆的入口
+```
+
+LLM 看到的上下文长这个样子。**工具调用中间产生的 `role=tool` 消息不会入库**，
+只有 `role=user/assistant` 的成对对话才会被往 L2/L3 写。这个边界在 `agent.py` 里已经隔出来了（只 append 最终 answer）。
+
+### 16.5 写入侧：「过滤 → 提炼 → 冲突检查 → 存储」
+
+**不全量记录**。本项目现在的写入点是 `Session.commit_turn()`，仅记录「成对」的 user+assistant，
+这已经过滤了大部分噪音。未来加多层过滤需要两个东西：
+
+1. **`何时触发写入`**：本项目采用「交付后写入」（最简单）。不采用「每句后写入」是为了避免被打断的残句污染记忆。
+2. **`提炼出什么`**：不是「该轮完整对话」，而是「该轮里有什么能改变画像或摘要的信息」。详见 16.6。
+
+**冲突检查**（可选，未来加）：用户之前说「我不吃辣」，后来说「今天吃了个火锅」。
+需要推理以及决策以哪个为准（是改画像还是仅作为事实）。本阶段可以先不做。
+
+### 16.6 反思机制：情景 → 语义的永恒沉淀
+
+**谁触发**：被裁减的老历史在 `dropped_buffer` 里积累到 `SUMMARY_TRIGGER_CHARS` 阈值（默认 1200），
+异步调 LLM 一次，生成「要点摘要」依公式覆盖到之前的 summary 上。
+
+**提炼出什么**：现在的 summary prompt 只要求「不超过 120 字的中文要点」，在改造中拆为两部分：
+
+```
+{「要点摘要」: 「上次聊了什么，完成了什么」,
+ 「用户画像补充」: 「名字/职业/偏好/重要事实」}
+```
+
+- **要点摘要** 上叠到 `summary`，作为 L3 会话记忆；
+- **用户画像补充** 提取出以 `key:value` 形式与现有 `profile` 合并，冲突时以「后者优先」处理（默认偏差允许）。
+这是「从事件提炼为认知」的关键一步。
+
+**不要频繁调 LLM**：沉淀仅在阈值达到时触发（默认累计 1200 字才调一次），
+避免在多轮喿9话中重复调。
+
+### 16.7 检索侧：本阶段仅需“全量拼接”
+
+原文提了「Recency × Relevance × Importance」三维打分，借鉴自 Generative Agents。
+本项目由于唯一会话的记忆完全可被 1 个 summary + 1 个 profile 覆盖，临阶段检索采用「全量拼接」，
+即 `build_messages()` 中总是将全部 L3 贴到 system 后面。为未来留下三个接口：
+
+- `MemoryQuery`：「查什么」。在 `build_messages` 中被构造；
+- `MemoryHit`：「查到了什么」；
+- `MemoryRetriever`：接口，默认实现是 `AllMemoryRetriever`，上向量后换成 `VectorRetriever` 不动主体代码。
+
+### 16.8 持久化与存盘设计
+
+**存储路径**：
+
+```
+backend/data/
+├─ memory/
+│  ├─ sessions/                  会话级别（L2）
+│  │  └─ <session_id>.json
+│  ├─ long_term.json             跨会话画像+总摘要（L3）
+│  └─ index.json                轻量索引（会话 id → 最后使用时间）
+│  └─ long_term.json.lock        加文件锁防并发
+```
+
+**刷交互**：
+
+1. **轻量幂阶**：`Session` 还是主要读写点，仅在 `commit_turn` 与 `clear` 两个时机超限同步刷盘。这保证性能与原型一致。
+2. **中量幂阶**：每 N 轮（默认 5）后台异步刷盘一次，应对崩溃。
+3. **反思幂阶**：检测到 dropped_buffer 超阈值 → 异步调 LLM → 同步写入 long_term.json。
+
+**与 `.env` 的关系**：
+
+- `backend/data/` 已被 `.gitignore` 忽略（需验证）；
+- long_term.json 会含用户个人信息，不该入库，不该跨机复制（选项：上云后再谈）。
+- 强烈建议在 README 补一句：「个人记忆不走 git，公共机器不要用」。
+
+### 16.9 与现有代码的映射
+
+| 现有代码 | 作用 | 设计后的变化 |
+|---|---|---|
+| `Session.history` | L2 情景记忆（滑动窗口） | 不变，增加持久化 |
+| `Session.dropped_buffer` | L2 被裁减老历史 | 不变 |
+| `Session.summary` | L3 会话摘要 | 不变，提炼提示词拆为「摘要+profile」 |
+| `Session.build_messages` | L1 工作记忆拼接 | 接入 `UserProfile` 作为系统人设贴片 |
+| `Session.clear` | 重置 | 同时清除本地磁盘 |
+| `ConversationManager.maybe_summarize` | 反思主点 | 不变接口，增加 profile 提取 |
+
+### 16.10 未来扩展点（明确不在本期范围内）
+
+- **向量检索**：接入 sentence-transformers / bge-m3 等本地 embedding。仅需实现 `VectorRetriever` 不动主体代码。
+- **冲突检查**：为 profile 加「后者优先」与「人工确认」两个优先级。
+- **多人多机器**：增加 `user_id` 层，`long_term.json` 变成 `<user_id>/long_term.json`。
+- **学习式序序记忆**：为常用 SOP 加一层 L0，接口类似于 tools/的资源文件加载。
+- **信任度与可退**：给每条记忆加 `confidence`，检索时作为第四个权重。
+
+### 16.11 新增的配置项（拟增加到 config.py）
+
+```python
+MEMORY_DATA_DIR = os.getenv("MEMORY_DATA_DIR", str(Path(__file__).parent / "data" / "memory"))
+MEMORY_FLUSH_EVERY_N_TURNS = int(os.getenv("MEMORY_FLUSH_EVERY_N_TURNS", "5"))
+MEMORY_MAX_LONG_TERM_CHARS = int(os.getenv("MEMORY_MAX_LONG_TERM_CHARS", "2000"))
+PROFILE_FIELDS = ["name", "occupation", "preferences", "key_facts"]  # 画像的锥提炼字段
+```
+
+### 16.12 本期范围2（不上向量库）
+
+- [ ] 接口：`MemoryRetriever` / `MemoryHit` / `MemoryQuery` 抽象（不接向量）
+- [ ] 实现：`AllMemoryRetriever`（全量拼接）
+- [ ] 实现：`UserProfile` 数据类（key/value，沉淀于 `long_term.json`）
+- [ ] 改造：`Session.build_messages` 接入 profile 作为系统人设贴片
+- [ ] 改造：`maybe_summarize` 提炼提示词拆为「摘要+profile」两部分
+- [ ] 实现：`FileStore` 持久化（sessions/*.json + long_term.json）
+- [ ] 改造：`ConversationManager` 接口不变，内部接入存储，含 `clear()` 同步删除磁盘
+- [ ] `.gitignore` 补一行 `backend/data/`
+- [ ] README 补一句：「个人记忆不走 git，公共机器不要用」
