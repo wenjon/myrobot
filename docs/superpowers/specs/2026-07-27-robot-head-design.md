@@ -564,13 +564,49 @@ LLM 看到的上下文长这个样子。**工具调用中间产生的 `role=tool
 ```
 
 - **要点摘要** 上叠到 `summary`，作为 L3 会话记忆；
-- **用户画像补充** 提取出以 `key:value` 形式与现有 `profile` 合并，冲突时以「后者优先」处理（默认偏差允许）。
+- **用户画像补充** 提取出以 `key:value` 形式与现有 `profile` 合并，冲突时以「**人工确认**」处理（选择 B 方案）：
+  - 提炼出来后，服务端对比新旧值，仅对**字段值不同**的项下发 `profile_conflict` WS 帧；
+  - 前端弹出确认卡（带旧值/新值/提炼出来的原句子）；
+  - 用户点 确认 → 写入新值；点 拒绝 → 保留旧值并记录一条 `rejected_change`；
+  - 超时（默认 60s）未回应，默认**保留旧值**（以保守为偏差，允许以环境变量调整）；
+  - 其他无冲突字段依旧直接合并。
 这是「从事件提炼为认知」的关键一步。
 
 **不要频繁调 LLM**：沉淀仅在阈值达到时触发（默认累计 1200 字才调一次），
 避免在多轮喿9话中重复调。
 
 ### 16.7 检索侧：本阶段仅需“全量拼接”
+
+### 16.7a Profile 冲突交互流程（B 方案）
+
+**发生位置**：仅在「反思」阶段（`maybe_summarize`）生成 pending diff，随下一轮问题一起下发。
+不会占用主对话的帧位置，不会打断 LLM 正在生成的响应。
+
+**流程**：
+
+```
+LLM 提炼出 「新画像」
+    ├─ 同字段值不变 → 直接合并
+    └─ 同字段值变化 → 生成 conflict_id，后台暂存为 pending diff
+下一轮问题到来 → 服务端随 LLM 调用下发 profile_conflict 帧
+                              ├─ 前端 确认 → apply diff，什继续主对话
+                              ├─ 前端 拒绝 → 记录 rejected_change，不改
+                              └─ 60s 超时 → 默认保旧
+```
+
+**新增 WS 消息类型**（详见第 5 章，补充定义）：
+
+- 服务端 → 客户端：`profile_conflict` 帧，字段 `{field, old_value, new_value, source_quote, conflict_id}`
+  - 同一轮可能多条冲突，用 `conflict_id` 与前端响应对应；
+  - 超过 `PROFILE_MAX_CONFLICTS_PER_TURN` （默认 3）部分只写日志不下发，下轮重评估。
+- 客户端 → 服务端：`profile_resolve` 帧，字段 `{conflict_id, action: "accept"|"reject"}`
+
+**超时与结果处理**：60s 内未回应，服务端默认保旧值，但仍上报一条 `resolved` 帧让前端可选销毁确认卡。
+
+**为什么超时保旧而不是保新**：B 方案的核心价值是「不让少数事件覆盖多数事件」。
+对试错语义「我以前喜欢 X，现在不喜欢了」，保旧安全；对事实型语义「你今天吃了火锅」，
+不会影响 profile（火锅是一次性事件，不是偏好，不该走 profile）。
+
 
 原文提了「Recency × Relevance × Importance」三维打分，借鉴自 Generative Agents。
 本项目由于唯一会话的记忆完全可被 1 个 summary + 1 个 profile 覆盖，临阶段检索采用「全量拼接」，
@@ -620,7 +656,7 @@ backend/data/
 ### 16.10 未来扩展点（明确不在本期范围内）
 
 - **向量检索**：接入 sentence-transformers / bge-m3 等本地 embedding。仅需实现 `VectorRetriever` 不动主体代码。
-- **冲突检查**：为 profile 加「后者优先」与「人工确认」两个优先级。
+- ~~**冲突检查**：为 profile 加「后者优先」与「人工确认」两个优先级。~~ 已采纳为 B 方案（详见 16.7a），不再列为 future work。
 - **多人多机器**：增加 `user_id` 层，`long_term.json` 变成 `<user_id>/long_term.json`。
 - **学习式序序记忆**：为常用 SOP 加一层 L0，接口类似于 tools/的资源文件加载。
 - **信任度与可退**：给每条记忆加 `confidence`，检索时作为第四个权重。
@@ -631,7 +667,9 @@ backend/data/
 MEMORY_DATA_DIR = os.getenv("MEMORY_DATA_DIR", str(Path(__file__).parent / "data" / "memory"))
 MEMORY_FLUSH_EVERY_N_TURNS = int(os.getenv("MEMORY_FLUSH_EVERY_N_TURNS", "5"))
 MEMORY_MAX_LONG_TERM_CHARS = int(os.getenv("MEMORY_MAX_LONG_TERM_CHARS", "2000"))
-PROFILE_FIELDS = ["name", "occupation", "preferences", "key_facts"]  # 画像的锥提炼字段
+PROFILE_FIELDS = ["name", "occupation", "preferences", "key_facts"]  # 画像的锥提炼字段（占位，待确认）
+PROFILE_CONFLICT_TIMEOUT_S = int(os.getenv("PROFILE_CONFLICT_TIMEOUT_S", "60"))   # 冲突确认超时，默认保旧
+PROFILE_MAX_CONFLICTS_PER_TURN = int(os.getenv("PROFILE_MAX_CONFLICTS_PER_TURN", "3"))  # 一轮最多提醒多少条冲突
 ```
 
 ### 16.12 本期范围2（不上向量库）
@@ -640,6 +678,10 @@ PROFILE_FIELDS = ["name", "occupation", "preferences", "key_facts"]  # 画像的
 - [ ] 实现：`AllMemoryRetriever`（全量拼接）
 - [ ] 实现：`UserProfile` 数据类（key/value，沉淀于 `long_term.json`）
 - [ ] 改造：`Session.build_messages` 接入 profile 作为系统人设贴片
+- [ ] 新增：WS 消息类型 `profile_conflict` / `profile_resolve`（服务端下发 + 客户端响应）
+- [ ] 新增：前端确认卡 UI（带新/旧值 + 原句子，超时可选 5s 提醒）
+- [ ] 改造：`maybe_summarize` 后同步生成 pending profile diffs，随下轮问题一起下发
+- [ ] 改造：`Session` 加 `apply_profile_diff(accept/reject)`，超时未响应则保旧
 - [ ] 改造：`maybe_summarize` 提炼提示词拆为「摘要+profile」两部分
 - [ ] 实现：`FileStore` 持久化（sessions/*.json + long_term.json）
 - [ ] 改造：`ConversationManager` 接口不变，内部接入存储，含 `clear()` 同步删除磁盘

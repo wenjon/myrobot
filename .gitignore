@@ -10,3 +10,6 @@ context.log
 # 本机密钥与私有配置（.env.example 是可提交的模板）
 .env
 .env.local
+# 参考资料（保留在工作区，不入库）：从知乎下载的文章 HTML 及其 _files 资源目录
+(74 *.html
+*_files/
