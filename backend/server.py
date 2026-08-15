@@ -91,7 +91,7 @@ def _check_secrets() -> None:
 
     if LLM_PROVIDER == "ark" and not ARK_API_KEY:
         _emit("[启动][警告] LLM_PROVIDER=ark 但 ARK_API_KEY 为空："
-              "请将 .env.example 复制为 .env 并填入密钥，或改用 LLM_PROVIDER=ollama。")
+              "请将 .env.example 复制为 .env 并填入密钥，或改用 LLM_PROVIDER=ollama / llamacpp。")
     if not TAVILY_API_KEY:
         _emit("[启动][提示] TAVILY_API_KEY 未配置，web_search 联网搜索将不可用。")
 

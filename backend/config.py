@@ -31,12 +31,21 @@ def _load_env_file(path: Path = _ENV_FILE) -> None:
 _load_env_file()
 
 # ---- LLM 供应商切换 ----
-# provider = "ark"（火山引擎 Ark，OpenAI 兼容）或 "ollama"（本地）
+# provider = "ark"（火山引擎 Ark，OpenAI 兼容）/ "ollama"（本地）/ "llamacpp"（本地 llama.cpp OpenAI 兼容服务）
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ark")
 
 # 本地 Ollama
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:12b")
+
+# 本地 llama.cpp server（OpenAI 兼容 /v1/chat/completions，默认无需 key）
+LLAMACPP_URL = os.getenv("LLAMACPP_URL", "http://127.0.0.1:8080/v1")
+LLAMACPP_MODEL = os.getenv("LLAMACPP_MODEL", "Qwen3.6-35B-A3B-MTP")
+# 留空则不发 Authorization 头；某些中转/反代可能要求 Bearer 鉴权
+LLAMACPP_API_KEY = os.getenv("LLAMACPP_API_KEY", "")
+
+# Qwen3 思考模式开关：1=启用深度思考（响应慢但质量高）；0=关闭（秒回，适配语音对话）
+ENABLE_THINKING = os.getenv("ENABLE_THINKING", "0") == "1"
 
 # 火山引擎 Ark（OpenAI 兼容 /chat/completions）
 ARK_BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/coding/v3")
