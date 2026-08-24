@@ -3,7 +3,7 @@
 基于《机器人头部交互式对话全链路技术方案（流式低延迟架构正式版）》的**纯软件模拟**实现。
 无需物理零件，用浏览器里的 **Three.js 3D 数字人**替代物理伺服头部，跑通全链路流式对话。
 
-链路：`文本/语音输入 → (ASR) → LLM(Ark / Ollama) → 文本解析中央调度(+工具调用) → TTS(Web Speech) → 3D viseme 口型/表情`
+链路：`文本/语音输入 → (ASR) → LLM(Ark / llama.cpp / Ollama) → 文本解析中央调度(+工具调用) → TTS(Web Speech) → 3D viseme 口型/表情`
 
 ## 本地自检
 
@@ -31,7 +31,7 @@ copy .env.example .env
 - `.env` 已被 `.gitignore` 忽略，永远不会被提交。
 - `backend/config.py` 启动时自动读取根目录 `.env`；**已导出的真实环境变量优先级更高**。
 - 服务启动时会自检：缺 `ARK_API_KEY` 或 `TAVILY_API_KEY` 会在控制台打印警告，但不阻断启动。
-- 完全不想用云端 LLM？把 `.env` 里改成 `LLM_PROVIDER=ollama` 即可走本地模型，无需任何密钥。
+- 完全不想用云端 LLM？把 `.env` 里改成 `LLM_PROVIDER=llamacpp`（llama.cpp 的 OpenAI 兼容服务）或 `LLM_PROVIDER=ollama` 即可走本地模型，无需任何密钥。
 
 ## 在另一台机器上继续开发
 
@@ -52,13 +52,13 @@ cloudflared tunnel --url http://127.0.0.1:8000
 ```
 
 ## 依赖
-- **LLM**：默认火山引擎 Ark（需 `ARK_API_KEY`）；或本地 **Ollama**（`LLM_PROVIDER=ollama`，无需密钥）
+- **LLM**：默认火山引擎 Ark（需 `ARK_API_KEY`）；或本地 **llama.cpp**（`LLM_PROVIDER=llamacpp`，默认 `http://127.0.0.1:8080/v1`）/ **Ollama**（`LLM_PROVIDER=ollama`），两者均无需密钥
 - **Python 3.10+**：`pip install -r backend/requirements.txt`
 - 现代浏览器（Chrome/Edge 推荐，含 Web Speech 合成与识别）
 
 ## 运行
 ```powershell
-# 1) 填好 .env（见上一节）；若用 Ollama 则确认它在跑：http://127.0.0.1:11434
+# 1) 填好 .env（见上一节）；若用 llama.cpp 确认 http://127.0.0.1:8080 在跑，若用 Ollama 确认 http://127.0.0.1:11434
 # 2) 启动后端（同时提供前端静态页）
 python backend\server.py
 # 3) 打开浏览器
@@ -66,8 +66,10 @@ python backend\server.py
 ```
 
 可用环境变量覆盖配置（见 `backend/config.py`）：
-- `LLM_PROVIDER`（`ark` 火山引擎 / `ollama` 本地，默认 `ark`）
+- `LLM_PROVIDER`（`ark` 火山引擎 / `llamacpp` 本地 llama.cpp / `ollama` 本地 Ollama，默认 `ark`）
 - Ark：`ARK_BASE_URL`、`ARK_API_KEY`、`ARK_MODEL`（默认 `ark-code-latest`）
+- llama.cpp：`LLAMACPP_URL`（默认 `http://127.0.0.1:8080/v1`）、`LLAMACPP_MODEL`（默认 `Qwen3.6-35B-A3B-MTP`）、`LLAMACPP_API_KEY`（可空）
+- `ENABLE_THINKING`（默认 `0`）— Qwen3 深度思考开关；关掉后首句延迟从 ~4s 降到 ~0.7s
 - `OLLAMA_MODEL`（默认 `gemma4:12b`）
 - `OLLAMA_URL`、`PORT`、`SYSTEM_PROMPT`、`SENTENCE_MIN_LEN`、`SENTENCE_MAX_LEN`
 
@@ -98,7 +100,7 @@ python backend\server.py
 ## 目录
 - `docs/superpowers/specs/` — 设计规格（superpowers 流程产出）
 - `backend/` — FastAPI + WebSocket 流式后端
-  - `pipeline/llm_client.py` — LLM 流式客户端（Ark / Ollama 可切）
+  - `pipeline/llm_client.py` — LLM 流式客户端（Ark / llama.cpp / Ollama 三选一）
   - `pipeline/text_router.py` — 文本解析中央调度（清洗/分句/动作分流）
   - `server.py` — WS 编排 + 静态托管
 - `frontend/` — Three.js 3D 数字人（Ready Player Me 风格头像 + ARKit blendshape/Oculus viseme）
@@ -108,7 +110,7 @@ python backend\server.py
 | 原方案环节 | Demo 实现 | 说明 |
 |---|---|---|
 | 流式 ASR | 浏览器语音识别 / 文本输入 | 后续可换 faster-whisper |
-| 流式 LLM | Ollama stream | ✅ 真流式 |
+| 流式 LLM | Ark SSE / llama.cpp / Ollama stream | ✅ 真流式 |
 | 文本解析中央调度 | `text_router.py` | ✅ 清洗/智能分句/动作提前下发 |
 | 流式 TTS + 时间戳 | Web Speech + `boundary` 事件 | 字级时间戳驱动口型 |
 | Visme 口型模型 | `viseme.js` → `head3d.js` Oculus viseme blendshape | 已升级 3D；拼音粗分，非真音素级 |
@@ -117,7 +119,8 @@ python backend\server.py
 ## 已知限制（Demo）
 - TTS 用浏览器 Web Speech（本机 edge-tts/SAPI 在此环境不稳定）；口型对齐为 demo 级。
 - 中文口型用拼音粗分/字符兜底，非真音素级。
-- 用 Ollama 时首次回答含模型加载耗时，二次更快；Ark 为云端，首包延迟取决于网络。
+- 用本地模型（llama.cpp / Ollama）时首次回答含模型加载耗时，二次更快；Ark 为云端，首包延迟取决于网络。
+- 用 Qwen3 类模型务必保持 `ENABLE_THINKING=0`，否则模型先输出一大段思考，数字人会张着嘴呆等好几秒。
 
 
 ## 数字人（3D 版）

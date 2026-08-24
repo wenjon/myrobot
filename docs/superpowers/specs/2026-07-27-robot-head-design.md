@@ -23,7 +23,7 @@
 
 | 环节 | 方案 | 说明 |
 |------|------|------|
-| LLM | **Ark**（火山引擎 OpenAI 兼容，`/chat/completions`），默认 `ark-code-latest`；本地 **Ollama**（`/api/chat`）作为备选 | 供应商可切换（`config.LLM_PROVIDER`）；默认 Ark 是因为本地不需 GPU 也能走、响应快 |
+| LLM | **三选一**：`ark`（火山引擎，云端，默认）/ `llamacpp`（本地 llama.cpp server，OpenAI 兼容）/ `ollama`（本地 `/api/chat`） | 供应商可切换（`config.LLM_PROVIDER`）；详见 2.1 |
 | TTS | 浏览器 **Web Speech API** (`SpeechSynthesis`) | 完全离线、内置中文语音、自带 `boundary` 事件（字/词时间戳），零依赖 |
 | 口型对齐 | TTS `boundary` 事件时间戳 → 拼音/音素 → viseme | 前端实时驱动，符合“时间戳=基准时钟” |
 | 虚拟头 | **Three.js 3D 数字人**（`avatar.glb`，GLTFLoader + 透视相机） | ARKit 52 blendshape 表情 + Oculus viseme 口型，WebGL 渲染 |
@@ -34,6 +34,32 @@
 设计决策说明：
 - **为什么 TTS 放前端**：本机 edge-tts 取不到音频、SAPI COM 在当前环境不稳定。Web Speech API 离线可用且天然带时间戳，最适合 demo，避免卡壳。TTS 做成**可替换接口**，后续可切到 Piper/本地音素引擎。
 - **为什么 3D 而不是 Wav2Lip/SadTalker/MuseTalk**：后者都依赖 NVIDIA CUDA（本机是 AMD 显卡，ROCm 不支持 Windows），而且它们是「整段音频 → 出 mp4」的**离线批处理**，与本方案的低延迟/可打断目标相冲。Three.js 方案纯 WebGL 渲染，无需 GPU 推理，实时驱动口型与表情，集显也能跑。
+
+### 2.1 三个 LLM 供应商的取舍
+
+| provider | 端点 | 默认模型 | 密钥 | 适用场景 |
+|---|---|---|---|---|
+| `ark` | `https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions` | `ark-code-latest` | 需 `ARK_API_KEY` | 本机无强 GPU，要求回答质量 |
+| `llamacpp` | `http://127.0.0.1:8080/v1/chat/completions` | `Qwen3.6-35B-A3B-MTP` | 默认无需（可选 `LLAMACPP_API_KEY`） | 本地推理、离线可用、不计费 |
+| `ollama` | `http://127.0.0.1:11434/api/chat` | `gemma4:12b` | 不需 | 已装 Ollama 的环境 |
+
+三者在 `llm_client.py` 里各有 `_stream` / `_once` / `_with_tools` 三个实现，
+对外统一成 `stream_chat` / `chat_once` / `chat_with_tools`，**上层不感知供应商**。
+
+#### Qwen3 思考模式开关（对语音对话很关键）
+
+Qwen3 系列默认会先输出一大段**深度思考**（`reasoning_content`）再给正式答案。
+这对写代码有利，但对**语音对话是灾难**——数字人会张着嘴呆等几秒才出声。
+
+处理方式分两层：
+
+1. **请求层关掉思考**：`ENABLE_THINKING=0`（默认）时在 payload 里传
+   `chat_template_kwargs: {"enable_thinking": false}`，让模型直接作答。
+   实测**首句延迟从 ~4s 降到 ~0.7s**。
+2. **解析层忽略思考**：流式解析只取 `delta.content`，**丢掉 `reasoning_content`**。
+   即使模型仍输出思考（某些构建不支持该参数），也不会被当成台词念出来。
+
+> 需要高质量推理（如复杂问题）时可临时 `ENABLE_THINKING=1`，代价是首句变慢。
 
 ## 3. 系统架构
 
@@ -46,8 +72,8 @@
 │                            │           │  ├ agent 工具编排（两阶段）│      │ ns       │
 │ tts.js（Web Speech 合成）  │ 分句/指令 │  │   · 探测→执行工具→回喂  │      └──────────┘
 │  └ boundary 字级时间戳     │ ◀─────────┼─ ├ text_router 中央调度    │      ┌──────────┐
-│ viseme.js（字→口型映射）  │           │  │   · 流式清洗/智能分句   │ HTTP │ Ollama   │
-│ head3d.js（Three.js 3D）   │           │  │   · 播报文本 vs 动作分流 │◀──────│ /api/chat│
+│ viseme.js（字→口型映射）  │           │  │   · 流式清洗/智能分句   │ HTTP │ llama.cpp│
+│ head3d.js（Three.js 3D）   │           │  │   · 播报文本 vs 动作分流 │◀──────│ /v1/chat │
 │  ├ ARKit 52 blendshape 表情│           │  ├ conversation 上下文管理 │（备选） └──────────┘
 │  └ Oculus viseme 口型      │           │  └ 发送: sentence/action/  │
 │                            │           │     status/interrupted    │      ┌──────────┐
@@ -55,6 +81,10 @@
                                                   ▲ tools/    │ HTTP │ /search  │
                                                   └──────────────┼─────▶└──────────┘
 ```
+
+> 右侧 LLM 供应商是**三选一**（`LLM_PROVIDER` 切换）：图中画了 `ark`（默认）与 `llamacpp`，
+> 第三种 `ollama`（`http://127.0.0.1:11434/api/chat`）接入位置与 `llamacpp` 完全一致，为保持图面简洁未重复绘制；
+> 详见 § 2.1。
 
 ### 数据流（流式并行）
 1. 用户文本/语音 → 前端经 WS 发送 `user_message`，服务端**入队**。
@@ -378,6 +408,14 @@ async def lifespan(app: FastAPI):
 | `ARK_API_KEY` | 硬编码在仓里 | 生成函数调用的凭证；生产可迁到 .env |
 | `ARK_MODEL` | `ark-code-latest` | Ark 上要用的模型 |
 
+**本地 llama.cpp server（`LLM_PROVIDER=llamacpp`）**
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `LLAMACPP_URL` | `http://127.0.0.1:8080/v1` | OpenAI 兼容基址（注意带 `/v1`） |
+| `LLAMACPP_MODEL` | `Qwen3.6-35B-A3B-MTP` | 模型名，需与 llama.cpp 启动时一致 |
+| `LLAMACPP_API_KEY` | （空） | 留空则**不发** `Authorization` 头；反代/中转要鉴权时才填 |
+| `ENABLE_THINKING` | `0` | `0`=关掉 Qwen3 深度思考（秒回，适配语音）；`1`=开启（慢但质量高） |
 ### 13.2 分句与语言
 | 变量 | 默认值 | 说明 |
 |---|---|---|
