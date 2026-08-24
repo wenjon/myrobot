@@ -12,11 +12,11 @@
 本 Demo 目标：
 - 打通对话主链路：`(可选)语音输入 → ASR → LLM → 文本解析中央调度 → TTS → 口型/表情驱动 → 浏览器虚拟头输出`。
 - 体现原方案的核心思想：**全链路流式并行**、**边收边推边出**、**TTS 时间戳作为口型对齐基准时钟**、**动作指令与播报文本分流**。
-- 用**屏幕上的 2D 虚拟头**替代物理伺服头部；伺服/时序补偿层留出接口占位。
+- 用**浏览器里的 3D 数字人头像**替代物理伺服头部；伺服/时序补偿层留出接口占位。
 
 非目标（本阶段不做）：
 - 物理电机 / 伺服驱动 / AEC-AGC 硬件级音频前处理。
-- 3D 拟人头（先做 2D 简版嘴型+表情，接口预留可升级 3D）。
+- ~~3D 拟人头（先做 2D 简版嘴型+表情，接口预留可升级 3D）。~~ **已完成**：已升级为 Three.js 3D 数字人（`avatar.glb`，ARKit 52 blendshape + Oculus viseme），详见第 7 章。
 - 生产级性能优化、模型量化、NPU 部署。
 
 ## 2. 关键技术选型（Demo）
@@ -26,37 +26,45 @@
 | LLM | **Ark**（火山引擎 OpenAI 兼容，`/chat/completions`），默认 `ark-code-latest`；本地 **Ollama**（`/api/chat`）作为备选 | 供应商可切换（`config.LLM_PROVIDER`）；默认 Ark 是因为本地不需 GPU 也能走、响应快 |
 | TTS | 浏览器 **Web Speech API** (`SpeechSynthesis`) | 完全离线、内置中文语音、自带 `boundary` 事件（字/词时间戳），零依赖 |
 | 口型对齐 | TTS `boundary` 事件时间戳 → 拼音/音素 → viseme | 前端实时驱动，符合“时间戳=基准时钟” |
-| 虚拟头 | **Three.js** 2D 平面（正交相机 + 精灵/形状） | 嘴型开合 + 基础表情，30FPS+ |
+| 虚拟头 | **Three.js 3D 数字人**（`avatar.glb`，GLTFLoader + 透视相机） | ARKit 52 blendshape 表情 + Oculus viseme 口型，WebGL 渲染 |
 | ASR | 浏览器 **Web Speech Recognition**（可选）+ 文本输入兜底 | 无麦克风也能跑；后续可替换 faster-whisper |
 | 后端 | **Python FastAPI + WebSocket** | 承载 LLM 流式转发 + 文本解析中央调度 |
 | 通信 | WebSocket 全双工流式 | 边收边推边出 |
 
 设计决策说明：
 - **为什么 TTS 放前端**：本机 edge-tts 取不到音频、SAPI COM 在当前环境不稳定。Web Speech API 离线可用且天然带时间戳，最适合 demo，避免卡壳。TTS 做成**可替换接口**，后续可切到 Piper/本地音素引擎。
-- **为什么 2D 头**：快速跑通全链路；BlendShape/viseme 概念用 2D 权重表达，接口对齐 ARKit 52，方便升级 3D。
+- **为什么 3D 而不是 Wav2Lip/SadTalker/MuseTalk**：后者都依赖 NVIDIA CUDA（本机是 AMD 显卡，ROCm 不支持 Windows），而且它们是「整段音频 → 出 mp4」的**离线批处理**，与本方案的低延迟/可打断目标相冲。Three.js 方案纯 WebGL 渲染，无需 GPU 推理，实时驱动口型与表情，集显也能跑。
 
 ## 3. 系统架构
 
 ```
-浏览器 (frontend)                         Python 后端 (backend)              Ollama
-┌───────────────────────────┐            ┌──────────────────────────┐      ┌────────┐
-│ 麦克风/文本输入            │  WS 文本   │ /ws 对话端点             │ HTTP │ /api/  │
-│  ├ Web Speech Recognition ─┼──────────▶ │  ├ TextRouter 中央调度   ─┼─────▶│ chat   │
-│  └ 文本框                  │            │  │   · 流式接收 LLM token│stream│ (stream)│
-│                            │ ◀──────────┼─ │   · 清洗/智能分句      │◀─────│        │
-│ VisemeEngine (口型映射)    │  分句/指令 │  │   · 播报文本 vs 动作分流│      └────────┘
-│  └ Web Speech 合成+boundary│            │  └ 发送: sentence/action │
-│ Three.js Head (2D)         │            └──────────────────────────┘
-│  └ 口型帧 + 表情           │
-└───────────────────────────┘
+浏览器 (frontend)                        Python 后端 (backend)                LLM 供应商
+┌────────────────────────┐           ┌─────────────────────────┐      ┌──────────┐
+│ 麦克风/文本输入            │  WS 文本  │ /ws 对话端点              │ HTTP │ Ark      │
+│  ├ Web Speech Recognition ─┼─────────▶│  ├ 队列 + 单 worker        │ SSE  │ /chat/   │
+│  └ 文本框                  │           │  ├ turn_policy 轮次策略   ─┼─────▶│ completio│
+│                            │           │  ├ agent 工具编排（两阶段）│      │ ns       │
+│ tts.js（Web Speech 合成）  │ 分句/指令 │  │   · 探测→执行工具→回喂  │      └──────────┘
+│  └ boundary 字级时间戳     │ ◀─────────┼─ ├ text_router 中央调度    │      ┌──────────┐
+│ viseme.js（字→口型映射）  │           │  │   · 流式清洗/智能分句   │ HTTP │ Ollama   │
+│ head3d.js（Three.js 3D）   │           │  │   · 播报文本 vs 动作分流 │◀──────│ /api/chat│
+│  ├ ARKit 52 blendshape 表情│           │  ├ conversation 上下文管理 │（备选） └──────────┘
+│  └ Oculus viseme 口型      │           │  └ 发送: sentence/action/  │
+│                            │           │     status/interrupted    │      ┌──────────┐
+└────────────────────────┘           └─────────────────────────┘      │ Tavily   │
+                                                  ▲ tools/    │ HTTP │ /search  │
+                                                  └──────────────┼─────▶└──────────┘
 ```
 
 ### 数据流（流式并行）
-1. 用户文本/语音 → 前端经 WS 发送 `user_message`。
-2. 后端 `TextRouter` 向 Ollama 发起 stream 请求，**边收 token**。
-3. `TextRouter` 增量清洗（去 emoji/markdown/思考内容），**智能分句**，识别行内动作标记 `[表情:...]`/`[动作:...]`。
-4. 每就绪一个短句 → 立刻经 WS 推给前端（`sentence` 消息），动作指令用 `action` 消息**提前下发**。
-5. 前端收到句子 → Web Speech 合成播报，`boundary` 事件按字触发 → `VisemeEngine` 计算口型权重 → Three.js 逐帧渲染嘴型；`action` 消息驱动表情。
+1. 用户文本/语音 → 前端经 WS 发送 `user_message`，服务端**入队**。
+2. `turn_policy.classify_incoming` 判定本句是「打断 / 附和 / 新提问」，决定是否中止当前轮（详见第 11 章）。
+3. `conversation.build_messages` 组装上下文：system（+摘要）+ 滑动窗口历史 + 本轮 user（详见第 16 章）。
+4. `agent.agent_stream` 两阶段推理：先带工具清单探测，需要则执行工具（如 `web_search`）并回喂，最后**流式**生成答案（详见第 10 章）。
+5. `text_router.route` 增量清洗（去 emoji/markdown/思考内容），**智能分句**，识别行内标记 `[表情:...]`/`[动作:...]`。
+6. 每就绪一个短句 → 立刻经 WS 推给前端（`sentence`）；表情/动作用 `action` **提前下发**，使表情先于语音到位。
+7. 前端 `tts.js` 用 Web Speech 合成播报，`boundary` 事件按字触发 → `viseme.js` 算出口型权重 → `head3d.js` 驱动 blendshape 逐帧渲染。
+8. 本轮正常结束→`commit_turn` 入库 + 下发 `llm_done`；被打断→不入库并下发 `interrupted` 让前端做自然收尾。
 
 ## 4. 模块划分
 
@@ -93,7 +101,7 @@
 
 ## 5. 接口契约（WebSocket JSON 消息）
 
-以下是完整定义，其中后述个别是后期增量。
+以下是完整定义（共 5 种 C→S、8 种 S→C），部分是后期增量添加的。
 
 客户端 → 服务端:
 - `{"type":"hello","session":"<sid>"}` — 必须首发；`session` 为空则服务端分配新 sid。未发 hello 前的其他帧会被忽略（保证不会错误绑定到别人的会话）。
@@ -104,7 +112,7 @@
 
 服务端 → 客户端:
 - `{"type":"session","session":"<sid>"}` — 对 hello 的回应，供前端写入 localStorage 以持久化 sid。
-- `{"type":"sentence","text":"这是一句播报","seq":0}` — 中央调度分击后的一句表达。
+- `{"type":"sentence","text":"这是一句播报","seq":0}` — 中央调度分句后的一句播报文本。
 - `{"type":"action","action":"表情|动作","value":"开心"}` — 提前下发的表情/动作指令，让前端表情与语音同步。
 - `{"type":"status","text":"正在联网搜索…"}` — 工具执行状态（如 web_search），让前端状态栏显示。
 - `{"type":"llm_done"}` — 本轮正常结束（已入库）。被打断不发。
@@ -127,24 +135,80 @@ LLM 输出约定（system prompt 引导）:
 - 不足阈值且未遇强标点时缓冲，遇强标点或超长即 flush。
 - 流结束时 flush 残留缓冲。
 
-## 7. 口型/表情映射（2D viseme）
+## 7. 口型/表情映射（3D blendshape）
+
+### 7.1 口型（viseme）
+- 链路：TTS `boundary` 字级时间戳 → `viseme.js` 求出目标 viseme → `head3d.js` 驱动 Oculus viseme blendshape。
 - 中文按拼音韵母粗分口型类别：`a`(大张)、`o/u`(圆唇)、`e/i`(扁平)、`闭合`(m/b/p/静音)。
-- 无拼音库时用字符哈希兜底伪口型，保证动画连续。
-- 表情层：`平静/开心/疑惑/惊讶`，由 `action` 消息叠加，插值过渡。
+- 无拼音库时用字符哈希兜底伪口型，保证动画连续（demo 级，非真音素级）。
+- 对外接口：`visemeForChar(ch)` / `visemeForText(text)` / `CLOSED`。
+
+### 7.2 表情（ARKit blendshape 组合）
+代码中 `head3d.js` 的 `EXPR` 表定义了 **6 种**表情，每种是一组 blendshape 权重的叠加：
+
+| 表情 | 主要 blendshape |
+|---|---|
+| 平静 | （全零，基准态） |
+| 开心 | `mouthSmileLeft/Right` 0.8、`cheekSquintLeft/Right` 0.4、`browInnerUp` 0.15 |
+| 悲伤 | `mouthFrownLeft/Right` 0.7、`browInnerUp` 0.7、`eyeSquintLeft/Right` 0.3 |
+| 生气 | `browDownLeft/Right` 0.9、`noseSneerLeft/Right` 0.5、`mouthPressLeft/Right` 0.5 |
+| 惊讶 | `browInnerUp` 0.8、`browOuterUpLeft/Right` 0.7、`eyeWideLeft/Right` 0.8、`jawOpen` 0.3 |
+| 疑惑 | `browInnerUp` 0.5、`browOuterUpLeft` 0.6、`mouthLeft` 0.4、`eyeSquintLeft` 0.3 |
+
+- 由 `action` 消息（`{"type":"action","action":"表情","value":"开心"}`）驱动，**插值过渡**避免突变。
+- 动作类（`点头`/`摇头`）不走 blendshape，而是直接旋转头部 mesh。
+- 额外的「我在听」倾听表情（`setListening`）不属于上表，是被打断时的自然收尾，详见 11.4。
+
+### 7.3 自定义表情的能力边界
+因为底层是 ARKit 52 路 blendshape，**理论上可以组合出任意表情**，包括不对称动作（如「左眼睁右眼闭」= `eyeBlinkRight:1.0` 单侧置位）。
+新增一种表情只需在 `EXPR` 里加一行，并在 `SYSTEM_PROMPT` 里告知 LLM 该标记可用。
 
 ## 8. 验收标准（Demo 级）
-- 输入一句中文，虚拟头能**流式**逐句播报并做口型动画，首句可见延迟主观“较快”。
+
+### 8.1 基础对话链路
+- 输入一句中文，数字人能**流式**逐句播报并做口型动画，首句可见延迟主观“较快”。
 - 口型与语音大致同步（demo 级，不追求 ≤120ms 硬指标）。
-- 支持点击“打断”停止当前播报。
-- LLM 输出的 `[表情:x]` 能驱动表情变化。
-- 无网络（除 Ollama 本地）也能运行前端 TTS。
+- LLM 输出的 `[表情:x]` / `[动作:x]` 能驱动表情与点头/摇头。
+- 前端 TTS 用浏览器 Web Speech，**不依赖外部语音服务**。
+
+### 8.2 工具调用（第 10 章）
+- 问「现在几点」能调 `get_time` 并用口语回答。
+- 问时事/实时信息能自动调 `web_search` 并基于搜索结果作答，期间下发 `status` 提示「正在联网搜索…」。
+- 工具循环不超过 `TOOL_MAX_ROUNDS`（默认 3），不会无限搜索。
+- 背诵长文类请求**不会误用工具**当「说话通道」（`echo` 已降为 DANGEROUS 不对 LLM 暴露）。
+
+### 8.3 轮次策略与打断（第 11 章）
+- 点「打断」按钮能立即硬停当前播报（不做收尾）。
+- `INTERRUPT_MODE=smart` 下：说「嗯嗯」「对」等**附和词不会打断**；说「等等」或抛新问题**会中止当前轮**。
+- 自动 barge-in 时前端做**自然收尾**：渐弱余音 + 「我在听」倾听表情，而不是硬切。
+- 被打断的残句**不入库**，不污染后续上下文。
+
+### 8.4 上下文与记忆（第 16 章）
+- 连续对话能记住前文（如先说「我叫小王」，后问「我叫什么」能答对）。
+- 刷新页面 / 重连后（同一 `session`）上下文不丢。
+- 不同 `session` 之间上下文**不串**。
+- 超出窗口的老历史会被摘要券（`summary`）而不是直接丢弃。
+- 服务端控制台能打印每轮的**实际上下文**与模型输出，带会话/连接标识便于调试。
+
+### 8.5 工程质量
+- `python -m compileall backend/` 无语法错；`scripts/check_no_hardcoded_secrets.py` 返回 0。
+- 代码中**无硬编码密钥**，密钥均从 `.env` 读取（第 14 章）。
+- GitHub Actions 三个 job 全绿（第 15 章）。
 
 ## 9. 后续可扩展（对齐原方案）
-- TTS 换 Piper/本地音素引擎，拿真音素级时间戳。
-- ASR 换 faster-whisper 流式，后端做 VAD/AEC。
-- 2D 头升级 Three.js 3D + ARKit 52 BlendShape。
-- 加入伺服时序补偿模块（当前为接口占位）。
+
+已完成（保留演进痕迹）：
+- ~~2D 头升级 Three.js 3D + ARKit 52 BlendShape。~~ **已完成**，详见第 7 章。
+- ~~工具调用（function calling）与联网搜索。~~ **已完成**，详见第 10 章。
+- ~~多轮上下文管理与打断安全。~~ **已完成**，详见第 11 / 16 章。
+
+待做：
+- TTS 换 Piper/本地音素引擎，拿真音素级时间戳（当前是拼音粗分 + 字级时间戳）。
+- ASR 换 faster-whisper 流式，后端做 VAD/AEC（当前依赖浏览器 Web Speech Recognition）。
+- 加入伺服时序补偿模块（当前为接口占位，无物理硬件）。
 - 全局时钟对齐、智能降级策略。
+- 记忆持久化与用户画像落地（第 16 章已出设计，**尚未实现**）。
+- 双模型路由（简单问题走快模型 / 复杂推理走强模型），待设计。
 
 
 ## 10. 工具调用框架（tools / function calling）
@@ -189,7 +253,7 @@ backend/tools/
 - `TOOL_MAX_PERMISSION`（默认 `read`）：可暴露给 LLM 的最高权限；`write`/`dangerous` 需显式提升。
 - `TAVILY_API_KEY` / `TAVILY_URL`：联网搜索后端。
 
-### 10.5b 联网搜索检索参数（web_search / Tavily 调优）
+### 10.6 联网搜索检索参数（web_search / Tavily 调优）
 位置：`backend/tools/web/web_search.py`。这些参数决定「回喂给 LLM 的搜索内容有多全」，
 直接影响长文/要点类问答的质量，也影响模型是否会「嫌不完整而反复搜」。
 
@@ -210,7 +274,7 @@ backend/tools/
 - 想更省 token/更快：回退 `basic` 并把 `PER_ITEM_MAX` 调到 500~800。
 - 想更全（消耗更大）：可加 Tavily `include_raw_content=true` 取网页原始正文。
 
-### 10.6 扩展新工具的步骤
+### 10.7 扩展新工具的步骤
 1. 在 `tools/<分类>/` 新建 `.py`，用 `@tool(...)` 装饰函数或继承 `Tool` 类；
 2. 写清 `description`（何时用/不该用）与 `parameters`（JSON Schema）；
 3. 有状态资源放进 `ResourceManager`，通过 `ctx.resources` 获取；
@@ -219,7 +283,7 @@ backend/tools/
 - 数据库类：建议只读 + 参数化/白名单，防注入。
 - 硬件类：标 `dangerous`，默认被闸门拦截，需显式提升权限或加确认流程。
 
-### 10.7 供应商兼容性
+### 10.8 供应商兼容性
 - Ark（OpenAI 兼容）：已验证支持 `tools`（`ark-code-latest` 实测可用）。
 - Ollama：`/api/chat` 支持 `tools`，但仅部分模型（qwen2.5 / llama3.1 等）；gemma 系列较弱。
 - 兜底：不支持原生 tools 的模型可改用 ReAct 提示词模式，后端正则解析动作。
@@ -361,7 +425,7 @@ async def lifespan(app: FastAPI):
 | `LOG_CONTEXT` | `1` | `0` 关闭上下文日志（控制台不打印，文件不写） |
 | `CONTEXT_LOG_FILE` | `backend/logs/context.log` | 日志文件路径；设为空串则只输出控制台 |
 
-### 13.8 三套环境供选型常见问题
+### 13.8 常见场景调参
 - 本机不能访问 Ark：`LLM_PROVIDER=ollama` 切回本场模型。
 - 不想联网：`ENABLE_TOOLS=0`，同时可以从 system prompt 移除「优先联网」那句。
 - 查看工具调用详情：保持 `LOG_CONTEXT=1`，在控制台会看到 `[工具 #<conn> 调用 <name> 参数=...` 这样的行。
@@ -497,7 +561,7 @@ python scripts/check_no_hardcoded_secrets.py
 | 类型 | 是什么 | 在本项目中的实现 | 生命周期 |
 |---|---|---|---|
 | **工作记忆** Working | 当前任务正在处理的上下文：推理中间态、本轮工具返回 | LLM 上下文窗口（每次调用重新组装） | 一轮 |
-| **情景记忆** Episodic | 过去发生过的具体事件：「上周帮你查过机票」「你一开始叫上帝」 | 会话的渐进历史（`Session.history`）+被裁减的測试缓冲（`Session.dropped_buffer`） | 会话期内（TTL） |
+| **情景记忆** Episodic | 过去发生过的具体事件：「上周帮你查过机票」「你一开始叫上帝」 | 会话的渐进历史（`Session.history`）+被裁减的待摘要缓冲（`Session.dropped_buffer`） | 会话期内（TTL） |
 | **语义记忆** Semantic | 从事件中提炼出的通用知识：「你喜欢简洁风格」「你偏好靠窗座位」 | 会话摘要 + 用户画像（`Session.summary` 与新增的 `UserProfile`） | 持久（含存盘） |
 | **程序记忆** Procedural | 固化的操作流程：「处理退款的标准流程是……」 | 系统提示词 + 工具注册表（`tools/REGISTRY`） | 随项目升级（本身不变） |
 
@@ -521,13 +585,13 @@ python scripts/check_no_hardcoded_secrets.py
 **为什么不一开始就上向量库？**
 
 - 当前只有**一个用户**，且记忆完全被 1 个 summary + profile 能覆盖，检索不是瓶颈。
-- 向量化 + 依赖接入 embedding 服务，增加了「embedding 质量不稳、需要冷启动、多层缓存」等问题，对 demo 阶段价价比偏低。
+- 向量化 + 依赖接入 embedding 服务，增加了「embedding 质量不稳、需要冷启动、多层缓存」等问题，对 demo 阶段性价比偏低。
 - 设计上保留接口：`memory.retrieval` 模块遵循同一个 `MemoryQuery` 接口，未来换向量库只是换一个实现。
 
 ### 16.4 单轮对话中记忆是怎么拼的
 
 ```
-[系统]  小枥的人设与口头禄（程序记忆的主体）              ← 常驻
+[系统]  小柚的人设与口头禅（程序记忆的主体）              ← 常驻
 [系统·贴片] 「你喜欢简洁风格」「你是 某某 公司的 CTO」  ← L3 语义记忆（profile）
 [系统·贴片] 上次聊过什么（summary）                       ← L3 会话摘要
 [user]    上下文中的某句话                                   ← L2 情景记忆（滑动窗口）
@@ -551,17 +615,29 @@ LLM 看到的上下文长这个样子。**工具调用中间产生的 `role=tool
 **冲突检查**（可选，未来加）：用户之前说「我不吃辣」，后来说「今天吃了个火锅」。
 需要推理以及决策以哪个为准（是改画像还是仅作为事实）。本阶段可以先不做。
 
-### 16.6 反思机制：情景 → 语义的永恒沉淀
+### 16.6 反思机制：情景 → 语义的沉淀
 
 **谁触发**：被裁减的老历史在 `dropped_buffer` 里积累到 `SUMMARY_TRIGGER_CHARS` 阈值（默认 1200），
-异步调 LLM 一次，生成「要点摘要」依公式覆盖到之前的 summary 上。
+异步调 LLM 一次，生成「要点摘要」并增量覆盖到之前的 summary 上。
 
 **提炼出什么**：现在的 summary prompt 只要求「不超过 120 字的中文要点」，在改造中拆为两部分：
 
 ```
 {「要点摘要」: 「上次聊了什么，完成了什么」,
- 「用户画像补充」: 「名字/职业/偏好/重要事实」}
+ 「用户画像补充」: {name: …, preferences: …, occupation: …}}
 ```
+
+**画像只提炼 3 个字段**（已定稿，`config.PROFILE_FIELDS`）：
+
+| 字段 | 含义 | 例子 |
+|---|---|---|
+| `name` | 称呼 | 「小王」「老师」 |
+| `preferences` | 偏好 / 习惯 / 注意事项（影响回答风格与内容） | 「喜欢简洁回答」「对青霉素过敏」 |
+| `occupation` | 职业 / 角色（影响解释的深浅） | 「CTO」「小学生」 |
+
+**为什么不要 `key_facts`**：它会变成「什么都能往里塞」的垃圾桶，LLM 提炼时目标不清。
+高代价信息（如过敏史）归到 `preferences` 下，结构更清楚、误判更少。
+以后需要 `relationships`（重要人物）或 `todos`（待办）时直接加字段，向前兼容，不影响 B 冲突流程。
 
 - **要点摘要** 上叠到 `summary`，作为 L3 会话记忆；
 - **用户画像补充** 提取出以 `key:value` 形式与现有 `profile` 合并，冲突时以「**人工确认**」处理（选择 B 方案）：
@@ -573,11 +649,11 @@ LLM 看到的上下文长这个样子。**工具调用中间产生的 `role=tool
 这是「从事件提炼为认知」的关键一步。
 
 **不要频繁调 LLM**：沉淀仅在阈值达到时触发（默认累计 1200 字才调一次），
-避免在多轮喿9话中重复调。
+避免在多轮对话中重复调。
 
 ### 16.7 检索侧：本阶段仅需“全量拼接”
 
-### 16.7a Profile 冲突交互流程（B 方案）
+### 16.8 Profile 冲突交互流程（B 方案）
 
 **发生位置**：仅在「反思」阶段（`maybe_summarize`）生成 pending diff，随下一轮问题一起下发。
 不会占用主对话的帧位置，不会打断 LLM 正在生成的响应。
@@ -616,7 +692,7 @@ LLM 提炼出 「新画像」
 - `MemoryHit`：「查到了什么」；
 - `MemoryRetriever`：接口，默认实现是 `AllMemoryRetriever`，上向量后换成 `VectorRetriever` 不动主体代码。
 
-### 16.8 持久化与存盘设计
+### 16.9 持久化与存盘设计
 
 **存储路径**：
 
@@ -642,7 +718,7 @@ backend/data/
 - long_term.json 会含用户个人信息，不该入库，不该跨机复制（选项：上云后再谈）。
 - 强烈建议在 README 补一句：「个人记忆不走 git，公共机器不要用」。
 
-### 16.9 与现有代码的映射
+### 16.10 与现有代码的映射
 
 | 现有代码 | 作用 | 设计后的变化 |
 |---|---|---|
@@ -651,28 +727,28 @@ backend/data/
 | `Session.summary` | L3 会话摘要 | 不变，提炼提示词拆为「摘要+profile」 |
 | `Session.build_messages` | L1 工作记忆拼接 | 接入 `UserProfile` 作为系统人设贴片 |
 | `Session.clear` | 重置 | 同时清除本地磁盘 |
-| `ConversationManager.maybe_summarize` | 反思主点 | 不变接口，增加 profile 提取 |
+| `ConversationManager.maybe_summarize` | 反思触发点 | 不变接口，增加 profile 提取 |
 
-### 16.10 未来扩展点（明确不在本期范围内）
+### 16.11 未来扩展点（明确不在本期范围内）
 
 - **向量检索**：接入 sentence-transformers / bge-m3 等本地 embedding。仅需实现 `VectorRetriever` 不动主体代码。
-- ~~**冲突检查**：为 profile 加「后者优先」与「人工确认」两个优先级。~~ 已采纳为 B 方案（详见 16.7a），不再列为 future work。
+- ~~**冲突检查**：为 profile 加「后者优先」与「人工确认」两个优先级。~~ 已采纳为 B 方案（详见 16.8），不再列为 future work。
 - **多人多机器**：增加 `user_id` 层，`long_term.json` 变成 `<user_id>/long_term.json`。
 - **学习式序序记忆**：为常用 SOP 加一层 L0，接口类似于 tools/的资源文件加载。
 - **信任度与可退**：给每条记忆加 `confidence`，检索时作为第四个权重。
 
-### 16.11 新增的配置项（拟增加到 config.py）
+### 16.12 新增的配置项（拟增加到 config.py）
 
 ```python
 MEMORY_DATA_DIR = os.getenv("MEMORY_DATA_DIR", str(Path(__file__).parent / "data" / "memory"))
 MEMORY_FLUSH_EVERY_N_TURNS = int(os.getenv("MEMORY_FLUSH_EVERY_N_TURNS", "5"))
 MEMORY_MAX_LONG_TERM_CHARS = int(os.getenv("MEMORY_MAX_LONG_TERM_CHARS", "2000"))
-PROFILE_FIELDS = ["name", "occupation", "preferences", "key_facts"]  # 画像的锥提炼字段（占位，待确认）
+PROFILE_FIELDS = ["name", "preferences", "occupation"]  # 画像只提炼这 3 个字段（已定稿）
 PROFILE_CONFLICT_TIMEOUT_S = int(os.getenv("PROFILE_CONFLICT_TIMEOUT_S", "60"))   # 冲突确认超时，默认保旧
 PROFILE_MAX_CONFLICTS_PER_TURN = int(os.getenv("PROFILE_MAX_CONFLICTS_PER_TURN", "3"))  # 一轮最多提醒多少条冲突
 ```
 
-### 16.12 本期范围2（不上向量库）
+### 16.13 本期范围（不上向量库）
 
 - [ ] 接口：`MemoryRetriever` / `MemoryHit` / `MemoryQuery` 抽象（不接向量）
 - [ ] 实现：`AllMemoryRetriever`（全量拼接）
@@ -687,3 +763,86 @@ PROFILE_MAX_CONFLICTS_PER_TURN = int(os.getenv("PROFILE_MAX_CONFLICTS_PER_TURN",
 - [ ] 改造：`ConversationManager` 接口不变，内部接入存储，含 `clear()` 同步删除磁盘
 - [ ] `.gitignore` 补一行 `backend/data/`
 - [ ] README 补一句：「个人记忆不走 git，公共机器不要用」
+
+## 17. 远程访问与部署（cloudflared 隧道）
+
+### 17.1 为什么需要
+
+服务默认只监听 `127.0.0.1:8000`。想用**手机或其他设备**访问数字人时，
+需要把本地端口暂时暴露到公网。本项目用 Cloudflare 快速隧道（不需账号）：
+
+```powershell
+cloudflared tunnel --url http://127.0.0.1:8000
+# 输出形如：https://xxx-yyy-zzz.trycloudflare.com
+# 访问：https://xxx-yyy-zzz.trycloudflare.com/app/index.html
+```
+
+### 17.2 HTTP 与 WebSocket 共用一个域名
+
+**关键点**：cloudflared 隧道**同时代理 HTTP 和 WebSocket**，不需要单独映射 WS 端口。
+因为 `/ws` 与静态页面同属一个 FastAPI 应用，走的是同一个 8000 端口。
+
+### 17.3 混合内容（Mixed Content）坑
+
+页面通过 `https://` 加载时，浏览器**禁止**连接不安全的 `ws://`：
+
+```
+Mixed Content: The page at 'https://…' was loaded over HTTPS, but attempted to
+connect to the insecure WebSocket endpoint 'ws://…'. This request has been blocked.
+```
+
+**解法**：`frontend/src/main.js` **根据页面当前协议自动选择**，不硬编码域名：
+
+```javascript
+const WS_PROTO = location.protocol === 'https:' ? 'wss:' : 'ws:';
+const WS_URL = `${WS_PROTO}//${location.host}/ws`;
+```
+
+（`ws.js` 只负责连接管理：自动重连、发送缓冲、心跳保活；URL 由调用方传入。）
+
+这样本地 `http://127.0.0.1:8000` 走 `ws://`，隧道 `https://…trycloudflare.com` 自动走 `wss://`，
+**域名每次变也不用改代码**（快速隧道的域名是随机分配的）。
+
+### 17.4 真实来源 IP 与日志
+
+经过隧道后，所有请求在 FastAPI 看来都来自 `127.0.0.1`。
+`SHOW_REAL_IP=1`（默认）时信任转发头以显示真实客户端 IP，并做两个归一化：
+
+- IPv6 的 v4-映射地址（`::ffff:1.2.3.4`）还原为纯 IPv4；
+- 纯 IPv6 加方括号（`[2409:…]:0`）以便与端口区分。
+
+设为 `SHOW_REAL_IP=0` 则不信任转发头，来源恒为本机（适合不想在日志里留客户端 IP 的场景）。
+
+### 17.5 移动网络下的连接健壮性
+
+`ws.js` 为隧道/移动网络场景做了三件事：
+
+- **发送缓冲**：未连接时的消息先入 `outbox` 队列，连上后自动补发——"
+  避免移动网络重连间隙丢消息（曾出现「前端有回显但服务端没收到」）。
+- **心跳保活**：每 20s 发一个 `ping`，缓解 Cloudflare / 运营商 NAT 对空闲 WS 的主动断开。
+- **自动重连 + 重发 hello**：断开后 2s 重试，并**重发记住的 `hello` 帧**，
+  保证重连后仍绑定到同一个 `session`（上下文不丢）。
+
+### 17.6 静态资源缓存
+
+手机浏览器会激进缓存 JS，导致改了前端代码但行为不变。
+`server.py` 的 `no_cache_static` 中间件对 `/app` 下的 `.js` / `.html` 强制不缓存：
+
+```
+Cache-Control: no-cache, no-store, must-revalidate
+Pragma: no-cache
+Expires: 0
+```
+
+### 17.7 常见故障对照
+
+| 现象 | 原因 | 解法 |
+|---|---|---|
+| 页面能开，一直「连接中」 | 混合内容拦住了 `ws://` | 确认 `ws.js` 按页面协议选 `wss:` |
+| `Unsupported upgrade request` | 缺 WebSocket 库 | `pip install 'uvicorn[standard]'` 或 `websockets` |
+| 发送后后端没反应 | 未先发 `hello` 帧 | 前端连接后必须先发 `hello` |
+| 多个设备上下文互相污染 | 共用了同一 `session` | 每个设备生成独立 sid（存 localStorage） |
+| 端口 8000 被占 | 旧进程未退 | `netstat -ano \| findstr :8000` 后 `taskkill /PID <pid> /F` |
+
+> 安全提醒：快速隧道是**公开可访问**的，任何拿到域名的人都能与你的数字人对话（并消耗你的 LLM 额度）。
+> 调试完毕及时关掉 cloudflared。需要长期公网服务应改用具名隧道 + 访问控制。

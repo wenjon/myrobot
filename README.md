@@ -1,9 +1,9 @@
 # myrobot — 机器人头部交互式对话（软件模拟 Demo）
 
 基于《机器人头部交互式对话全链路技术方案（流式低延迟架构正式版）》的**纯软件模拟**实现。
-无需物理零件，用浏览器里的 2D 虚拟头替代物理伺服头部，跑通全链路流式对话。
+无需物理零件，用浏览器里的 **Three.js 3D 数字人**替代物理伺服头部，跑通全链路流式对话。
 
-链路：`文本/语音输入 → (ASR) → LLM(Ollama) → 文本解析中央调度 → TTS(Web Speech) → 2D 口型/表情`
+链路：`文本/语音输入 → (ASR) → LLM(Ark / Ollama) → 文本解析中央调度(+工具调用) → TTS(Web Speech) → 3D viseme 口型/表情`
 
 ## 本地自检
 
@@ -52,16 +52,15 @@ cloudflared tunnel --url http://127.0.0.1:8000
 ```
 
 ## 依赖
-- **Ollama**（本地已运行，默认模型 `gemma3:12b`）
+- **LLM**：默认火山引擎 Ark（需 `ARK_API_KEY`）；或本地 **Ollama**（`LLM_PROVIDER=ollama`，无需密钥）
 - **Python 3.10+**：`pip install -r backend/requirements.txt`
 - 现代浏览器（Chrome/Edge 推荐，含 Web Speech 合成与识别）
 
 ## 运行
 ```powershell
-# 1) 确认 Ollama 在跑： http://127.0.0.1:11434
+# 1) 填好 .env（见上一节）；若用 Ollama 则确认它在跑：http://127.0.0.1:11434
 # 2) 启动后端（同时提供前端静态页）
-cd backend
-python server.py
+python backend\server.py
 # 3) 打开浏览器
 #    http://127.0.0.1:8000/app/index.html
 ```
@@ -69,7 +68,7 @@ python server.py
 可用环境变量覆盖配置（见 `backend/config.py`）：
 - `LLM_PROVIDER`（`ark` 火山引擎 / `ollama` 本地，默认 `ark`）
 - Ark：`ARK_BASE_URL`、`ARK_API_KEY`、`ARK_MODEL`（默认 `ark-code-latest`）
-- `OLLAMA_MODEL`（默认 `gemma3:12b`）
+- `OLLAMA_MODEL`（默认 `gemma4:12b`）
 - `OLLAMA_URL`、`PORT`、`SYSTEM_PROMPT`、`SENTENCE_MIN_LEN`、`SENTENCE_MAX_LEN`
 
 ## 交互
@@ -78,14 +77,32 @@ python server.py
 - 打断：停止当前播报（barge-in 模拟）。
 - LLM 输出的 `[表情:开心]`/`[动作:点头]` 会驱动表情与点头。
 
+## 设计文档
+
+完整设计规格（共 17 章）：`docs/superpowers/specs/2026-07-27-robot-head-design.md`
+
+常用章节速查：
+
+| 想了解 | 看第几章 |
+|---|---|
+| 整体架构与数据流 | 3 |
+| WebSocket 消息完整定义 | 5 |
+| 口型/表情怎么驱动的 | 7 |
+| 工具调用（联网搜索等） | 10 |
+| 打断策略与自然收尾 | 11 |
+| 所有配置项含义 | 13 |
+| 密钥管理 | 14 |
+| 记忆模块设计（尚未实现） | 16 |
+| 手机/外网访问与排障 | 17 |
+
 ## 目录
 - `docs/superpowers/specs/` — 设计规格（superpowers 流程产出）
 - `backend/` — FastAPI + WebSocket 流式后端
-  - `pipeline/llm_client.py` — Ollama 流式客户端
+  - `pipeline/llm_client.py` — LLM 流式客户端（Ark / Ollama 可切）
   - `pipeline/text_router.py` — 文本解析中央调度（清洗/分句/动作分流）
   - `server.py` — WS 编排 + 静态托管
 - `frontend/` — Three.js 3D 数字人（Ready Player Me 风格头像 + ARKit blendshape/Oculus viseme）
-  - `src/head.js` `src/tts.js` `src/viseme.js` `src/ws.js` `src/main.js`
+  - `src/head3d.js` `src/tts.js` `src/viseme.js` `src/ws.js` `src/main.js`
 
 ## 与原方案的对应 & 简化
 | 原方案环节 | Demo 实现 | 说明 |
@@ -94,13 +111,13 @@ python server.py
 | 流式 LLM | Ollama stream | ✅ 真流式 |
 | 文本解析中央调度 | `text_router.py` | ✅ 清洗/智能分句/动作提前下发 |
 | 流式 TTS + 时间戳 | Web Speech + `boundary` 事件 | 字级时间戳驱动口型 |
-| Visme 口型模型 | `viseme.js` 2D 口型映射 | 简化；接口可升级 3D BlendShape |
+| Visme 口型模型 | `viseme.js` → `head3d.js` Oculus viseme blendshape | 已升级 3D；拼音粗分，非真音素级 |
 | 伺服时序补偿 | 前端插值占位 | 物理层留待后续 |
 
 ## 已知限制（Demo）
 - TTS 用浏览器 Web Speech（本机 edge-tts/SAPI 在此环境不稳定）；口型对齐为 demo 级。
 - 中文口型用拼音粗分/字符兜底，非真音素级。
-- 首次回答含 Ollama 模型加载耗时，二次更快。
+- 用 Ollama 时首次回答含模型加载耗时，二次更快；Ark 为云端，首包延迟取决于网络。
 
 
 ## 数字人（3D 版）
