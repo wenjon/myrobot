@@ -1,4 +1,4 @@
-﻿"""工具框架 · 注册表与执行分发。
+"""工具框架 · 注册表与执行分发。
 
 ToolRegistry 负责：
 - 注册工具（类实例）并防重名；
@@ -6,7 +6,8 @@ ToolRegistry 负责：
 - 统一执行：参数校验 + 超时 + 权限闸门 + 异常隔离 + 日志。
 
 同时提供 @tool 装饰器，让「简单函数」也能快速注册成工具，
-无需写完整的类。
+无需写完整的类。name / description / parameters 三项均可省略，
+省略时由 schema.py 从函数签名与 docstring 自动推导（详见该模块）。
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ import inspect
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from .base import Tool, ToolCategory, ToolContext, ToolResult, Permission
+from .schema import schema_from_function, describe_from_function
 
 
 class _FunctionTool(Tool):
@@ -30,11 +32,14 @@ class _FunctionTool(Tool):
         self.parameters = parameters
         self.timeout_s = timeout_s
         self._func = func
+        # 函数是否声明了 ctx 参数？注册时反射一次并缓存，
+        # 避免每次调用工具都做一次 inspect.signature。
+        self._wants_ctx = "ctx" in inspect.signature(func).parameters
         super().__init__()
 
     async def run(self, args: Dict[str, Any], ctx: ToolContext) -> ToolResult:
-        # 函数可选择是否接收 ctx 参数
-        if "ctx" in inspect.signature(self._func).parameters:
+        # 函数可选择是否接收 ctx：声明了就传，没声明就不传。
+        if self._wants_ctx:
             result = self._func(**args, ctx=ctx)
         else:
             result = self._func(**args)
@@ -68,16 +73,36 @@ class ToolRegistry:
         self._tools[tool.name] = tool
         return tool
 
-    def tool(self, *, name: str, description: str,
+    def tool(self, *, name: Optional[str] = None, description: Optional[str] = None,
              category: ToolCategory = ToolCategory.SYSTEM,
              permission: Permission = Permission.READ,
              parameters: Optional[Dict[str, Any]] = None,
              timeout_s: float = 15.0):
-        """装饰器：把 async/sync 函数注册成工具。"""
+        """装饰器：把 async/sync 函数注册成工具。
+
+        name / description / parameters 三项都是**可选**的，省略时自动推导：
+        - name        <- 函数名
+        - description <- docstring 首段
+        - parameters  <- 函数签名的类型注解 + docstring 的 Args: 段
+
+        两种写法长期共存：简单工具靠推导少写十几行样板；
+        遇到嵌套对象 / enum / 复杂数组等推不出的结构，显式传 parameters= 覆盖。
+
+        推导失败（如忘写 docstring 导致 description 为空）会直接报错，
+        因为空描述的工具 LLM 根本不知道何时该调，属于必须在启动时暴露的错误。
+        """
         def deco(func: Callable) -> Callable:
+            final_name = name or func.__name__
+            final_desc = description if description is not None else describe_from_function(func)
+            if not final_desc:
+                raise ValueError(
+                    f"工具 {final_name} 缺少描述：请写 docstring 首段，"
+                    f"或给 @tool 传 description=。"
+                )
+            final_params = parameters if parameters is not None else schema_from_function(func)
             self.register(_FunctionTool(
-                func, name=name, description=description, category=category,
-                permission=permission, parameters=parameters or {"type": "object", "properties": {}},
+                func, name=final_name, description=final_desc, category=category,
+                permission=permission, parameters=final_params,
                 timeout_s=timeout_s,
             ))
             return func

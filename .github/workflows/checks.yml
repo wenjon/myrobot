@@ -15,7 +15,7 @@ on:
 
 jobs:
   # ------------------------------------------------------------------
-  # Job 1: 语法编译——把 backend/ 下所有 .py 编译一遗
+  # Job 1: 语法编译——把 backend/ 下所有 .py 编译一遍
   # ------------------------------------------------------------------
   python-syntax:
     name: Python 语法检查
@@ -33,8 +33,14 @@ jobs:
         # 本项目的 .py 含大量中文注释且由脚本生成，这一步正是为了卡住编码事故。
         run: python -m compileall -q backend/ scripts/
 
+      - name: 工具 schema 与函数签名一致性
+        # @tool 的 parameters 现在可以从函数签名自动推导（docs § 10.7），
+        # 但手写覆盖仍然允许。手写的那些容易与函数参数对不上，
+        # 而错误只会在用户真的触发该工具时才报 TypeError，所以在 CI 提前卡住。
+        run: python scripts/check_tool_schemas.py
+
       - name: 关键模块可导入自检
-        # 比 compileall 更进一步：真正 import 一次，能抳到循环引用 / 笔误的模块名。
+        # 比 compileall 更进一步：真正 import 一次，能捕到循环引用 / 笔误的模块名。
         # 不导入 server.py（它会初始化日志与工具，属于运行时行为）。
         working-directory: backend
         run: |

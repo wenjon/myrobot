@@ -101,6 +101,7 @@ python backend\server.py
 - `docs/superpowers/specs/` — 设计规格（superpowers 流程产出）
 - `backend/` — FastAPI + WebSocket 流式后端
   - `pipeline/llm_client.py` — LLM 流式客户端（Ark / llama.cpp / Ollama 三选一）
+  - `tools/schema.py` — 从函数签名+docstring 自动推导工具 JSON Schema
   - `pipeline/text_router.py` — 文本解析中央调度（清洗/分句/动作分流）
   - `server.py` — WS 编排 + 静态托管
 - `frontend/` — Three.js 3D 数字人（Ready Player Me 风格头像 + ARKit blendshape/Oculus viseme）

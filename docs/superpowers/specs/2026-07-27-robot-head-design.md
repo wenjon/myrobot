@@ -257,6 +257,7 @@ LLM 输出约定（system prompt 引导）:
 backend/tools/
   base.py       # Tool 抽象基类 / ToolCategory / Permission / ToolResult / ToolContext
   registry.py   # ToolRegistry：注册、按分类/权限导出 schema、执行分发；@tool 装饰器
+  schema.py     # 从函数签名 + docstring 自动推导 JSON Schema（见 10.7）
   loader.py     # 启动时扫描子包自动注册（插件发现）
   context.py    # ResourceManager：共享 HTTP client / 未来 DB/串口
   builtin/basic.py    # 零依赖工具：get_time / echo
@@ -304,11 +305,92 @@ backend/tools/
 - 想更省 token/更快：回退 `basic` 并把 `PER_ITEM_MAX` 调到 500~800。
 - 想更全（消耗更大）：可加 Tavily `include_raw_content=true` 取网页原始正文。
 
-### 10.7 扩展新工具的步骤
+### 10.7 新增工具：两种写法
+
+#### 写法 A：自动推导 schema（推荐，适用于绝大多数工具）
+
+`@tool` 的 `name` / `description` / `parameters` 三项均可省略，
+省略时由 `tools/schema.py` 从函数自身推导：
+
+```python
+@tool(category=ToolCategory.SYSTEM, permission=Permission.READ)
+async def get_time(timezone: str = "") -> str:
+    """获取当前的日期和时间。当用户询问现在几点、今天日期、星期几时使用。
+
+    Args:
+        timezone: 时区名（可选），如 Asia/Shanghai。默认使用服务器本地时间。
+    """
+```
+
+推导规则：
+
+| schema 字段 | 来源 |
+|---|---|
+| `name` | 函数名 `func.__name__` |
+| `description` | docstring **首段**（到第一个空行为止；后续补充段不计入，避免长描述干扰选工具） |
+| `properties[x].type` | 参数类型注解：`str`→string、`int`→integer、`float`→number、`bool`→boolean、`List[str]`→array+items、`dict`→object |
+| `properties[x].description` | docstring 的 `Args:` 段里对应行（支持 `name (str): 说明` 与多行接续） |
+| `required` | **没有默认值**的参数（有默认值则为可选） |
+
+几个细节：
+- `Optional[X]` / `Union[X, None]` 会剥掉 `None` 取 `X`；枚举类转为 `string` + `enum` 候选值。
+- **`ctx` / `self` / `cls` 自动忽略** —— 它们是框架注入的，不是 LLM 可填参数；
+  函数是否需要 `ctx` 在**注册时反射一次并缓存**（`_FunctionTool._wants_ctx`），
+  不再每次调用都跑 `inspect.signature`。
+- `*args` / `**kwargs` 无法表达为 schema，会被跳过。
+- **忘写 docstring 会在启动时直接报 `ValueError`**：描述为空的工具 LLM 根本不知道何时该调，
+  属于必须尽早暴露的错误，不能默默注册一个永远不会被调用的工具。
+
+#### 写法 B：手写 schema 覆盖（复杂结构时）
+
+嵌套对象、数组元素是对象、手写 `enum` 限定值域……这些推不出来，
+显式传 `parameters=` 即可，与以前完全一样：
+
+```python
+@tool(name="db_query", description="...", parameters={
+    "type": "object",
+    "properties": {
+        "table": {"type": "string", "enum": ["users", "orders"]},
+        "filters": {"type": "object", "properties": {}},
+    },
+    "required": ["table"],
+})
+```
+
+**两种写法长期共存**，不强要求统一。推导仅在对应项**未传**时生效，
+显式传了就用你写的；部分覆盖也合法（比如只覆盖 `parameters`、让 `description` 走推导）。
+
+#### 为什么要做推导
+
+手写 schema 有两个真实代价：
+
+1. **样板量大**：`get_time` 原本 20 行里有 14 行是 schema，真正的逻辑只 3 行。
+2. **会写歪且发现得极晚**：schema 里叫 `query`、函数参数叫 `q`，注册时不报错，
+   要等到**用户真的触发那个工具**才在 `self._func(**args)` 处炸 `TypeError`。
+
+第 2 点尤其阴险，所以额外配了一个自检脚本（已接入 CI，见 § 15.2）：
+
+```
+python scripts/check_tool_schemas.py
+```
+
+它对注册表里的每个工具做 5 项校验：
+1. schema 声明的参数在函数里真存在（除非函数收 `**kwargs`）；
+2. 函数的必填参数（无默认值）都在 `required` 里；
+3. `required` 里的参数都在 `properties` 里有定义；
+4. `name` / `description` 非空且 `parameters.type == "object"`；
+5. 每个参数都有 `description`（**仅警告**，不阻断）。
+
+这个脚本对两种写法都生效 —— 推导的天然一致，手写的靠它卡住。
+
+#### 实施时的四个步骤
+
 1. 在 `tools/<分类>/` 新建 `.py`，用 `@tool(...)` 装饰函数或继承 `Tool` 类；
-2. 写清 `description`（何时用/不该用）与 `parameters`（JSON Schema）；
+2. 写清 docstring 首段（何时用 / 不该用）与 `Args:` 段；复杂结构才手写 `parameters=`；
 3. 有状态资源放进 `ResourceManager`，通过 `ctx.resources` 获取；
 4. 若在新分类目录，在 `loader.py` 的 `_TOOL_PACKAGES` 登记一次。
+
+各类工具的额外注意事项：
 - 文档类：解析后先切块/检索，只回喂相关片段，避免撑爆上下文。
 - 数据库类：建议只读 + 参数化/白名单，防注入。
 - 硬件类：标 `dangerous`，默认被闸门拦截，需显式提升权限或加确认流程。
@@ -545,15 +627,19 @@ python backend\server.py
 
 配置在 `.github/workflows/checks.yml`，触发时机：`push` 到 master / 任意 PR / 手动触发。
 
-| job | 做什么 | 能抳到的问题 |
+| job | 做什么 | 能捕到的问题 |
 |---|---|---|
-| `python-syntax` | `compileall -q backend/ scripts/` + 关键模块真实 `import` | 语法错、缩进错、编码错、循环引用、笔误的模块名 |
+| `python-syntax` | `compileall -q backend/ scripts/` + 工具 schema 自检 + 关键模块真实 `import` | 语法错、缩进错、编码错、循环引用、笔误的模块名、schema 与函数签名不一致 |
 | `secret-scan` | 跑 `scripts/check_no_hardcoded_secrets.py` | 密钥被硬编码回代码 |
 | `js-syntax` | `node --check` 校验 5 个自写前端模块 | 前端 JS 语法错 |
 
 `compileall` 之后额外做一次 `import config, pipeline.text_router, pipeline.turn_policy, tools`：
-编译通过只说明语法合法，真正 import 才能抳到循环引用与写错的模块路径。
+编译通过只说明语法合法，真正 import 才能捕到循环引用与写错的模块路径。
 注意 **不导入 `server.py`** —— 它在模块层面就会初始化日志、加载工具，属于运行时行为，不该在静态检查里做。
+
+`python-syntax` 里还多跑了一步 `scripts/check_tool_schemas.py`：它会真的 `load_all()`
+把工具全注册一遍，再用 `inspect` 逐个对比 schema 与函数签名（规则见 § 10.7）。
+这一步**不需要任何 API Key**（工具只注册、不执行），所以能放在静态检查里。
 
 ### 15.3 刻意保持的边界
 
