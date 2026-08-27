@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
@@ -28,6 +28,20 @@
   #status.bad { color: #eb5757; }
   .expr-row { display: flex; flex-wrap: wrap; gap: 6px; }
   .expr-row button { background: #253048; padding: 4px 10px; font-size: 12px; }
+  /* 画像冲突确认卡（docs § 16.8）：用暖色边框区分于普通对话气泡 */
+  #profileCards { display: flex; flex-direction: column; gap: 8px; }
+  .profile-card { background: #1f1c14; border: 1px solid #6b5a2a; border-radius: 8px; padding: 10px; font-size: 13px; }
+  .profile-card.pc-pending { opacity: 0.55; }
+  .pc-title { font-weight: 600; color: #e0c56a; margin-bottom: 6px; }
+  .pc-diff { margin-bottom: 6px; line-height: 1.6; }
+  .pc-old { color: #8a8f9c; text-decoration: line-through; }
+  .pc-arrow { color: #7a8296; }
+  .pc-new { color: #6fcf97; font-weight: 600; }
+  .pc-quote { color: #7a8296; font-size: 12px; margin-bottom: 8px; line-height: 1.5; }
+  .pc-actions { display: flex; gap: 8px; }
+  .pc-actions button { padding: 4px 12px; font-size: 12px; }
+  .pc-yes { background: #3a6a4a; }
+  .pc-no { background: #4a4a55; }
 </style>
 <script type="importmap">
 {
@@ -40,7 +54,7 @@
 <body>
   <div id="left">
     <div id="wrap"><canvas id="face"></canvas></div>
-    <div class="sub" style="padding:8px;">全链路流式：LLM（Ark / Ollama 可切）→ 中央调度（分句 + 表情推送）→ Web Speech TTS → Three.js 3D 数字人 viseme 口型 / 表情</div>
+    <div class="sub" style="padding:8px;">全链路流式：LLM（Ark / llama.cpp / Ollama 三选一）+ 工具调用（联网搜索）→ 记忆（滑动窗口 + 摘要 + 用户画像）→ 中央调度（分句 + 表情推送）→ Web Speech TTS → Three.js 3D 数字人 viseme 口型 / 表情</div>
   </div>
   <div id="right">
     <div>
@@ -48,6 +62,8 @@
       <div class="sub">状态：<span id="status" class="bad">初始化…</span></div>
     </div>
     <div id="log"></div>
+    <!-- 画像冲突确认卡容器：服务端下发 profile_conflict 时在此插入卡片 -->
+    <div id="profileCards"></div>
     <div class="expr-row" id="exprTest"></div>
     <div class="row">
       <textarea id="input" placeholder="输入中文对话，回车发送…"></textarea>

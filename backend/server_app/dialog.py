@@ -38,6 +38,32 @@ from pipeline.text_router import route
 
 # 服务端「辅助」模块：上下文日志、服务端日志器。
 from .logging import get_logger, log_context, log_output
+from .notify import send_json
+
+
+# ---------------------------------------------------------------------
+# 辅助：下发待确认的画像冲突
+# ---------------------------------------------------------------------
+async def _notify_profile_conflicts(ws: WebSocket, session, who: str = "") -> None:
+    """把本会话的待确认画像冲突下发给前端（最多 N 条）。
+
+    超出 PROFILE_MAX_CONFLICTS_PER_TURN 的部分不下发，只写日志，下轮再评估——
+    一次弹一堆确认卡比不弹更烦人。
+    """
+    log = get_logger()
+    try:
+        conflicts = session.take_conflicts_to_notify()
+    except Exception:  # noqa: BLE001
+        return
+    if not conflicts:
+        return
+    total = len(session.pending_conflicts)
+    if total > len(conflicts):
+        log.emit(f"[记忆 {who}] 待确认画像冲突 {total} 条，本轮只下发 {len(conflicts)} 条")
+    for c in conflicts:
+        log.emit(f"[记忆 {who}] 下发画像冲突确认卡: {c.field_name} "
+                 f"{c.old_value!r} -> {c.new_value!r} (id={c.conflict_id})")
+        await send_json(ws, c.to_ws())
 
 
 # ---------------------------------------------------------------------
@@ -136,10 +162,25 @@ async def run_dialog(
     session.commit_turn("".join(assistant_text))
     await ws.send_text(json.dumps({"type": "llm_done"}, ensure_ascii=False))
 
-    # === 5) 后台：可能地压缩「被裁掉」的旧历史为记忆摘要（不阻塞主流程） ===
-    # 延迟 import 避免循环；失败不影响主轮。
+    # === 5) 反思：把「被裁掉」的旧历史沉淀为摘要 + 用户画像 ===
+    #
+    # 历史坑：这里原本写的是 `from pipeline.conversation import conversations`，
+    # 而当时那个单例并不存在（实例建在 server.py 里），再加上外层的
+    # `except Exception: pass`，导致**摘要功能一直静默失败、从未真正跑过**。
+    # 现在单例已移到 pipeline/conversation.py 模块层，两边必然拿到同一个对象。
+    #
+    # 为什么反思放在本轮“交付后”：它要调一次 LLM（比较慢），
+    # 放在 llm_done 之后就不会拘迟用户听到最后一句话。
     from pipeline.conversation import conversations
     try:
         await conversations.maybe_summarize(session, chat_once)
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001
+        # 反思失败不能影响已经成功的本轮对话，但要把原因打出来，
+        # 不能像以前那样静默吃掉（那正是上面那个 bug 潜伏很久的原因）。
+        log.emit(f"[记忆] 反思环节异常（不影响本轮对话）: {type(e).__name__}: {e}")
+
+    # === 6) 把待确认的画像冲突随本轮末尾下发（B 方案，docs § 16.8）===
+    #
+    # 为什么不在反思一提炼出来就立即下发：那时数字人可能正在说话，
+    # 弹确认卡会打断体验。放到本轮完全结束后下发最自然。
+    await _notify_profile_conflicts(ws, session, who)

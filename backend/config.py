@@ -120,6 +120,29 @@ SUMMARY_TRIGGER_CHARS = int(os.getenv("SUMMARY_TRIGGER_CHARS", "1200"))
 # 会话空闲多久后回收（秒）
 SESSION_TTL = int(os.getenv("SESSION_TTL", "3600"))
 
+# ---- 记忆模块（第 16 章）----
+# 记忆落盘目录。里面会存 sessions/<id>.json 与 long_term.json。
+# 注意：long_term.json 含用户个人信息，已在 .gitignore 里忽略 backend/data/，
+# 不要入库、不要跳机器复制。
+MEMORY_DATA_DIR = os.getenv(
+    "MEMORY_DATA_DIR", str(Path(__file__).resolve().parent / "data" / "memory")
+)
+# 是否启用磁盘持久化（0 = 纯内存，重启就忘，方便跑测试）
+MEMORY_PERSIST = os.getenv("MEMORY_PERSIST", "1") == "1"
+# 中量级刷盘：每 N 轮强制落盘一次，应对进程崩溃丢记忆
+MEMORY_FLUSH_EVERY_N_TURNS = int(os.getenv("MEMORY_FLUSH_EVERY_N_TURNS", "5"))
+# 贴入 system 的长期记忆（摘要 + 画像）字符上限，防止撑爆上下文
+MEMORY_MAX_LONG_TERM_CHARS = int(os.getenv("MEMORY_MAX_LONG_TERM_CHARS", "2000"))
+
+# 用户画像只提炼这 3 个字段（已定稿，见 docs § 16.6）。
+# 为什么不要 key_facts：它会变成「什么都能往里塞」的垃圾桶，
+# LLM 提炼时目标不清；高代价信息（如过敏史）归到 preferences 下。
+PROFILE_FIELDS = ["name", "preferences", "occupation"]
+# profile 冲突采用 B 方案（人工确认）：超时未回应则**保旧**
+PROFILE_CONFLICT_TIMEOUT_S = int(os.getenv("PROFILE_CONFLICT_TIMEOUT_S", "60"))
+# 一轮最多下发多少条冲突确认卡，超出的只写日志，下轮重评估
+PROFILE_MAX_CONFLICTS_PER_TURN = int(os.getenv("PROFILE_MAX_CONFLICTS_PER_TURN", "3"))
+
 # ---- 上下文日志 ----
 # 是否在控制台/文件打印每轮上下文与输出
 LOG_CONTEXT = os.getenv("LOG_CONTEXT", "1") == "1"

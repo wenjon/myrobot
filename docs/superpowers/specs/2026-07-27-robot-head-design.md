@@ -110,7 +110,7 @@ Qwen3 系列默认会先输出一大段**深度思考**（`reasoning_content`）
 - `pipeline/` — 业务管线：
   - `llm_client.py` — LLM 流式客户端（Ark 与 Ollama 两套，`stream_chat` / `chat_once` / `chat_with_tools`）。
   - `text_router.py` — 中央调度：清洗 / 智能分句 / 动作抽取。
-  - `conversation.py` — 多轮上下文管理（P0 安全提交 + P1 滑动窗口 + 摘要式长期记忆 + TTL 回收）。
+  - `conversation.py` — 多轮上下文与记忆管理（P0 安全提交 + P1 滑动窗口 + 反思沉淀 + TTL 回收）；模块层持有全局单例 `conversations`。
   - `agent.py` — 工具调用编排（两阶段：探测/工具循环 → 流式最终答）。
   - `turn_policy.py` — smart 轮次策略分类（`classify_incoming`：interrupt / backchannel / question）。
 - `tools/` — 插件式工具框架（详见第 10 章）：
@@ -120,6 +120,12 @@ Qwen3 系列默认会先输出一大段**深度思考**（`reasoning_content`）
   - `context.py` — `RESOURCES`（跨工具复用的资源池，当前仅 httpx.AsyncClient）。
   - `builtin/basic.py` — `get_time` / `echo`（零依赖）。
   - `web/web_search.py` — `web_search`（Tavily）。
+  - `schema.py` — 从函数签名 + docstring 自动推导 JSON Schema（见 10.7）。
+- `memory/` — 记忆模块（详见第 16 章）：
+  - `types.py` — `MemoryQuery` / `MemoryHit` / `MemoryRetriever` / `MemoryKind` 抽象。
+  - `retriever.py` — `AllMemoryRetriever`（全量拼接，画像优先于摘要）。
+  - `profile.py` — `UserProfile`（三字段画像）与 `ProfileConflict`（B 方案冲突）。
+  - `store.py` — `FileStore`（原子写 + 坏文件降级）与全局单例 `STORE`。
 
 前端 `frontend/`
 - `index.html` — 页面（画布 + 输入区 + 状态）。
@@ -128,10 +134,11 @@ Qwen3 系列默认会先输出一大段**深度思考**（`reasoning_content`）
 - `src/viseme.js` — 字/拼音 → viseme 权重映射。
 - `src/head3d.js` — Three.js 加载 GLB（ARKit 52 动画 + Oculus viseme），表情 / 口型 / 点头 / 「我在听」倾听表情。
 - `src/main.js` — 装配与事件流（含 `enterListening`）。
+- `src/profile_card.js` — 画像冲突确认卡 UI（旧值删除线 / 新值高亮 / 提炼原句 / 确认与拒绝）。
 
 ## 5. 接口契约（WebSocket JSON 消息）
 
-以下是完整定义（共 5 种 C→S、8 种 S→C），部分是后期增量添加的。
+以下是完整定义（共 6 种 C→S、10 种 S→C），部分是后期增量添加的。
 
 客户端 → 服务端:
 - `{"type":"hello","session":"<sid>"}` — 必须首发；`session` 为空则服务端分配新 sid。未发 hello 前的其他帧会被忽略（保证不会错误绑定到别人的会话）。
@@ -139,6 +146,7 @@ Qwen3 系列默认会先输出一大段**深度思考**（`reasoning_content`）
 - `{"type":"interrupt"}` — 手动打断（点「打断」按钮）：立即中止当前轮 + 清空队列。不会触发「自然收尾」。
 - `{"type":"clear"}` — 打断 + 清队 + 清空该 sid 的会话历史。
 - `{"type":"ping"}` — 心跳；服务端不回复但会记日志。
+- `{"type":"profile_resolve","conflict_id":"<cid>","action":"accept|reject"}` — 用户对画像变更拍板（第 16 章）。**不进对话队列**：它只改记忆、不触发 LLM，即使数字人正在说话也能立即处理。
 
 服务端 → 客户端:
 - `{"type":"session","session":"<sid>"}` — 对 hello 的回应，供前端写入 localStorage 以持久化 sid。
@@ -149,6 +157,8 @@ Qwen3 系列默认会先输出一大段**深度思考**（`reasoning_content`）
 - `{"type":"error","message":"..."}` — LLM/网络/工具等异常。
 - `{"type":"cleared"}` — 对 clear 的确认。
 - `{"type":"interrupted","reason":"question|interrupt|always"}` — 自动 barge-in 时下发（仅 `INTERRUPT_MODE=always/smart` 触发），前端做自然收尾（渐弱 + 「我在听」倾听表情）。详见第 11 章。
+- `{"type":"profile_conflict","conflict_id":"<cid>","field":"name","field_label":"称呼","old_value":"小王","new_value":"老王","source_quote":"以后叫我老王"}` — 画像变更需人工确认（第 16 章 B 方案）。**在本轮 `llm_done` 之后才下发**，避免确认卡打断正在进行的播报。
+- `{"type":"profile_resolved","conflict_id":"<cid>","action":"accept","ok":true}` — 对 `profile_resolve` 的确认。`ok=false` 表示 conflict_id 未知或已超时；**无论成败都会回这一帧**，让前端能销毁卡片而不致于永久悬着。
 
 协议小结：
 - 连接必须先 `hello` 后才能处理其他帧；
@@ -219,6 +229,10 @@ LLM 输出约定（system prompt 引导）:
 - 不同 `session` 之间上下文**不串**。
 - 超出窗口的老历史会被摘要券（`summary`）而不是直接丢弃。
 - 服务端控制台能打印每轮的**实际上下文**与模型输出，带会话/连接标识便于调试。
+- **进程重启后**同一 `session` 的摘要与用户画像仍在（落盘到 `backend/data/memory/`）。
+- 说「以后叫我老王」且旧值不同时，前端弹**确认卡**；未确认前一律**保旧**。
+- 确认卡的下发**不会打断**本轮播报（在 `llm_done` 之后）；点确认/拒绍**不会触发 LLM**。
+- `python scripts/check_memory.py` 全部断言通过（已接入 CI）。
 
 ### 8.5 工程质量
 - `python -m compileall backend/` 无语法错；`scripts/check_no_hardcoded_secrets.py` 返回 0。
@@ -231,13 +245,13 @@ LLM 输出约定（system prompt 引导）:
 - ~~2D 头升级 Three.js 3D + ARKit 52 BlendShape。~~ **已完成**，详见第 7 章。
 - ~~工具调用（function calling）与联网搜索。~~ **已完成**，详见第 10 章。
 - ~~多轮上下文管理与打断安全。~~ **已完成**，详见第 11 / 16 章。
+- ~~记忆持久化与用户画像落地。~~ **已完成**，详见第 16 章（三层存储 + Profile 冲突人工确认 + 文件持久化）。
 
 待做：
 - TTS 换 Piper/本地音素引擎，拿真音素级时间戳（当前是拼音粗分 + 字级时间戳）。
 - ASR 换 faster-whisper 流式，后端做 VAD/AEC（当前依赖浏览器 Web Speech Recognition）。
 - 加入伺服时序补偿模块（当前为接口占位，无物理硬件）。
 - 全局时钟对齐、智能降级策略。
-- 记忆持久化与用户画像落地（第 16 章已出设计，**尚未实现**）。
 - 双模型路由（简单问题走快模型 / 复杂推理走强模型），待设计。
 
 
@@ -537,15 +551,28 @@ async def lifespan(app: FastAPI):
 | `MAX_CONTEXT_CHARS` | `4000` | 发给 LLM 的上下文总字符上限，超过则从头裁 |
 | `ENABLE_SUMMARY` | `1` | 是否启用「被裁掉的老历史 → 长期记忆摘要」 |
 | `SUMMARY_TRIGGER_CHARS` | `1200` | 被裁掉的那些历史累计超过该字数才触发压缩为摘要 |
-| `SESSION_TTL` | `3600` | 会话空闲多少秒后回收，避免内存滥用 |
+| `SESSION_TTL` | `3600` | 会话空闲多少秒后回收（踢出内存前会先落盘） |
 
-### 13.7 调试日志
+### 13.7 记忆模块（第 16 章）
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `MEMORY_DATA_DIR` | `backend/data/memory` | 记忆落盘目录（`sessions/*.json` 与 `long_term.json`） |
+| `MEMORY_PERSIST` | `1` | `0` = 纯内存，重启就忘；跑测试时用 |
+| `MEMORY_FLUSH_EVERY_N_TURNS` | `5` | 每 N 轮强制落盘一次，应对进程崩溃 |
+| `MEMORY_MAX_LONG_TERM_CHARS` | `2000` | 贴进 system 的长期记忆字符上限（超限先丢摘要、保住画像） |
+| `PROFILE_CONFLICT_TIMEOUT_S` | `60` | 画像冲突确认超时，超时**保旧** |
+| `PROFILE_MAX_CONFLICTS_PER_TURN` | `3` | 一轮最多下发多少张确认卡，超出的下轮再评估 |
+
+`PROFILE_FIELDS` 是**代码常量**（不读环境变量）：`["name", "preferences", "occupation"]`。
+因为新增字段需要同步改提炼提示词与中文标签，不是改个环境变量就能生效的事。
+
+### 13.8 调试日志
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `LOG_CONTEXT` | `1` | `0` 关闭上下文日志（控制台不打印，文件不写） |
 | `CONTEXT_LOG_FILE` | `backend/logs/context.log` | 日志文件路径；设为空串则只输出控制台 |
 
-### 13.8 常见场景调参
+### 13.9 常见场景调参
 - 本机不能访问 Ark：`LLM_PROVIDER=ollama` 切回本场模型。
 - 不想联网：`ENABLE_TOOLS=0`，同时可以从 system prompt 移除「优先联网」那句。
 - 查看工具调用详情：保持 `LOG_CONTEXT=1`，在控制台会看到 `[工具 #<conn> 调用 <name> 参数=...` 这样的行。
@@ -629,9 +656,9 @@ python backend\server.py
 
 | job | 做什么 | 能捕到的问题 |
 |---|---|---|
-| `python-syntax` | `compileall -q backend/ scripts/` + 工具 schema 自检 + 关键模块真实 `import` | 语法错、缩进错、编码错、循环引用、笔误的模块名、schema 与函数签名不一致 |
+| `python-syntax` | `compileall -q backend/ scripts/` + 工具 schema 自检 + 记忆模块自检 + 关键模块真实 `import` | 语法错、缩进错、编码错、循环引用、笔误的模块名、schema 与函数签名不一致、记忆层行为回退 |
 | `secret-scan` | 跑 `scripts/check_no_hardcoded_secrets.py` | 密钥被硬编码回代码 |
-| `js-syntax` | `node --check` 校验 5 个自写前端模块 | 前端 JS 语法错 |
+| `js-syntax` | `node --check` 校验自写前端模块（含 `profile_card.js`）| 前端 JS 语法错 |
 
 `compileall` 之后额外做一次 `import config, pipeline.text_router, pipeline.turn_policy, tools`：
 编译通过只说明语法合法，真正 import 才能捕到循环引用与写错的模块路径。
@@ -640,6 +667,11 @@ python backend\server.py
 `python-syntax` 里还多跑了一步 `scripts/check_tool_schemas.py`：它会真的 `load_all()`
 把工具全注册一遍，再用 `inspect` 逐个对比 schema 与函数签名（规则见 § 10.7）。
 这一步**不需要任何 API Key**（工具只注册、不执行），所以能放在静态检查里。
+
+同理还多跑了 `scripts/check_memory.py`（67 项断言）。它能进 CI 的关键在于两个设计：
+**用假 summarizer 替掉真 LLM 调用**（不需密钥、不请求网络），
+**把 `MEMORY_DATA_DIR` 指到 `tempfile.mkdtemp()`**（不碰开发机的真实记忆）。
+它也是目前唯一个**断言行为而非仅断言语法**的检查，因为反思链路曾经静默失效过（见 § 16.11）。
 
 ### 15.3 刻意保持的边界
 
@@ -816,77 +848,125 @@ LLM 提炼出 「新画像」
 - `MemoryHit`：「查到了什么」；
 - `MemoryRetriever`：接口，默认实现是 `AllMemoryRetriever`，上向量后换成 `VectorRetriever` 不动主体代码。
 
-### 16.9 持久化与存盘设计
+### 16.9 持久化与存盘设计（**已实现** `memory/store.py`）
 
-**存储路径**：
+**存储路径**（实际落地结果，比原设计更简）：
 
 ```
-backend/data/
-├─ memory/
-│  ├─ sessions/                  会话级别（L2）
-│  │  └─ <session_id>.json
-│  ├─ long_term.json             跨会话画像+总摘要（L3）
-│  └─ index.json                轻量索引（会话 id → 最后使用时间）
-│  └─ long_term.json.lock        加文件锁防并发
+backend/data/memory/
+├─ sessions/
+│  └─ <session_id>.json      L2：滑动窗口历史 + dropped_buffer + summary + turn_count
+└─ long_term.json           L3：跳会话的用户画像 UserProfile
 ```
 
-**刷交互**：
+与原设计的两处**刻意简化**：
 
-1. **轻量幂阶**：`Session` 还是主要读写点，仅在 `commit_turn` 与 `clear` 两个时机超限同步刷盘。这保证性能与原型一致。
-2. **中量幂阶**：每 N 轮（默认 5）后台异步刷盘一次，应对崩溃。
-3. **反思幂阶**：检测到 dropped_buffer 超阈值 → 异步调 LLM → 同步写入 long_term.json。
+- **不做 `index.json`**。会话索引可以直接 `sessions/` 目录枚举得到，多一份索引就多一份不一致风险。
+- **不做 `.lock` 文件锁**。单进程单 worker（见第 12 章），写入只发生在对话 worker 协程里，不存在跳进程竞争。真正防的是**写到一半进程挂了**，那是原子写解决的事。
 
-**与 `.env` 的关系**：
+**三个工程上必需的细节**（都在 `FileStore` 里）：
 
-- `backend/data/` 已被 `.gitignore` 忽略（需验证）；
-- long_term.json 会含用户个人信息，不该入库，不该跨机复制（选项：上云后再谈）。
-- 强烈建议在 README 补一句：「个人记忆不走 git，公共机器不要用」。
+1. **原子写**：先写 `<name>.tmp` 再 `os.replace()` 覆盖。`os.replace` 在同一文件系统内是原子的，
+   因此**不会出现“写了一半的 JSON”**。直接 `open(path,"w")` 则会先清空文件，崩溃就永久丢记忆。
+2. **坏文件降级**：读到无法解析的 JSON 时，把它改名为 `.broken.<时间戳>` 并返回 `None`，
+   让程序**以空记忆继续跑**而不是启动失败。现场现场保留下来，事后还能人工捧回。
+3. **路径穿越防护**：`session_id` 是**客户端传的**，直接拼进文件名等于把文件写入权交给外部（`../../x`）。
+   `_safe_id()` 把非 `[A-Za-z0-9_-]` 全部替为 `_` 并截断到 64 字符。
 
-### 16.10 与现有代码的映射
+**三个刷盘时机**：
 
-| 现有代码 | 作用 | 设计后的变化 |
+| 时机 | 写什么 | 为何 |
 |---|---|---|
-| `Session.history` | L2 情景记忆（滑动窗口） | 不变，增加持久化 |
-| `Session.dropped_buffer` | L2 被裁减老历史 | 不变 |
-| `Session.summary` | L3 会话摘要 | 不变，提炼提示词拆为「摘要+profile」 |
-| `Session.build_messages` | L1 工作记忆拼接 | 接入 `UserProfile` 作为系统人设贴片 |
-| `Session.clear` | 重置 | 同时清除本地磁盘 |
-| `ConversationManager.maybe_summarize` | 反思触发点 | 不变接口，增加 profile 提取 |
+| 每 `MEMORY_FLUSH_EVERY_N_TURNS`（默认 5）轮 | session json | 平衷 IO 与崩溃丢失量 |
+| 会话被 TTL 踢出内存前 | session json | 否则 `_gc()` 一跑就白丢 |
+| profile 发生变更（merge / accept）| long_term.json | 画像是高价值低频数据，立即落盘 |
 
-### 16.11 未来扩展点（明确不在本期范围内）
+`MEMORY_PERSIST=0` 时 `FileStore` 全部接口退化为**空操作**（读返回 `None`，写返回 `False`）。
+好处是调用方不需要到处写 `if MEMORY_PERSIST:`，开关只在一个地方生效。
+
+**隐私与仓库卫生**：
+
+- `.gitignore` 已加 `backend/data/`（**已验证**：`git check-ignore` 命中）。
+- `long_term.json` 含真实个人信息，**不入库、不跳机复制**。
+- README 已补一句：「个人记忆不走 git，公共机器上用 `MEMORY_PERSIST=0`」。
+
+### 16.10 与代码的映射（实现后）
+
+| 代码位置 | 层级 | 职责 |
+|---|---|---|
+| `Session.build_messages()` | L1 工作记忆 | 拼 system（+ 长期记忆贴片）+ 滑动窗口 + 本轮 user；**长期记忆一律过检索器取**，不直读字段 |
+| `Session.history` | L2 情景 | 滑动窗口（`MAX_TURNS`），随 session json 落盘 |
+| `Session.dropped_buffer` | L2 待沉淀区 | 被窗口裁掉的老历史，累计过阀就去反思 |
+| `Session.summary` | L3 会话摘要 | 反思产物，随 session json 落盘 |
+| `Session.profile` (`UserProfile`) | L3 语义 | 3 个字段的用户画像，落 `long_term.json` |
+| `Session.pending_conflicts` | 交互态 | 待用户拍板的画像变更，**不落盘**（重启就作废，等于保旧） |
+| `ConversationManager.maybe_summarize()` | 写入侧 | 反思触发点，返回 `List[ProfileConflict]` |
+| `memory/retriever.py` | 检索侧 | `AllMemoryRetriever`：画像在前、摘要在后；超 `max_chars` 时**先丢摘要、保住画像** |
+| `memory/store.py` | 持久层 | 原子写 + 坏文件降级 + 路径穿越防护；全局单例 `STORE` |
+| `memory/types.py` | 抽象 | `MemoryKind` / `MemoryQuery` / `MemoryHit` / `MemoryRetriever` ABC，为将来接向量库留口 |
+| `server.py` WS 循环 | 交互 | 处理 `profile_resolve`，**不进对话队列** |
+| `server_app/dialog.py` | 交互 | `_notify_profile_conflicts()` 在 `llm_done` 之后下发 `profile_conflict` |
+| `frontend/src/profile_card.js` | UI | 确认卡（旧值删除线 / 新值高亮 / 提炼原句 / 确认与拒绍） |
+
+### 16.11 一个真实踩到的坑：反思链路曾静默失效
+
+实现本章时发现：**摘要/反思功能上线后从未真正运行过**。根因是两个错误叠在一起：
+
+1. `ConversationManager` 的单例当时建在 `server.py` 里，而 `server_app/dialog.py` 写的是
+   `from pipeline.conversation import conversations` —— 这个**模块级名字根本不存在**。
+2. 这句 import 外面包了 `except Exception: pass`。于是 `ImportError` 被**静默吃掉**，日志里一行都没有。
+
+**修法**：单例下沉到 `pipeline/conversation.py` 模块层（`conversations = ConversationManager()`），
+`server.py` 改为 import 它而不再自己 new，两边必然是同一个对象；`dialog.py` 的 `except` 改为**打印原因**。
+
+**教训（已沉为本项目约定）**：
+
+- 共享状态的单例一律建在**定义它的模块**里，不要建在入口文件里再到处传。
+- `except Exception: pass` 只允许用在**真的无所谓**的地方；涉及功能开关的一律打印。
+- “看不到报错”不等于“在工作”。所以 `scripts/check_memory.py` 专门断言了**反思真的被调用到**。
+
+### 16.12 未来扩展点（明确不在本期范围内）
 
 - **向量检索**：接入 sentence-transformers / bge-m3 等本地 embedding。仅需实现 `VectorRetriever` 不动主体代码。
-- ~~**冲突检查**：为 profile 加「后者优先」与「人工确认」两个优先级。~~ 已采纳为 B 方案（详见 16.8），不再列为 future work。
+- ~~**冲突检查**：为 profile 加「后者优先」与「人工确认」两个优先级。~~ 已采纳为 B 方案（详见 16.8），**已实现**。
 - **多人多机器**：增加 `user_id` 层，`long_term.json` 变成 `<user_id>/long_term.json`。
-- **学习式序序记忆**：为常用 SOP 加一层 L0，接口类似于 tools/的资源文件加载。
+- **学习式程序记忆**：为常用 SOP 加一层 L0，接口类似于 tools 的资源文件加载。
 - **信任度与可退**：给每条记忆加 `confidence`，检索时作为第四个权重。
 
-### 16.12 新增的配置项（拟增加到 config.py）
+### 16.13 新增的配置项（**已在 config.py 生效**）
+
+完整含义见第 13.7 节。实际代码：
 
 ```python
-MEMORY_DATA_DIR = os.getenv("MEMORY_DATA_DIR", str(Path(__file__).parent / "data" / "memory"))
+MEMORY_DATA_DIR = os.getenv("MEMORY_DATA_DIR", str(Path(__file__).resolve().parent / "data" / "memory"))
+MEMORY_PERSIST = os.getenv("MEMORY_PERSIST", "1") == "1"          # 0 = 纯内存，跑测试/公共机器用
 MEMORY_FLUSH_EVERY_N_TURNS = int(os.getenv("MEMORY_FLUSH_EVERY_N_TURNS", "5"))
 MEMORY_MAX_LONG_TERM_CHARS = int(os.getenv("MEMORY_MAX_LONG_TERM_CHARS", "2000"))
-PROFILE_FIELDS = ["name", "preferences", "occupation"]  # 画像只提炼这 3 个字段（已定稿）
-PROFILE_CONFLICT_TIMEOUT_S = int(os.getenv("PROFILE_CONFLICT_TIMEOUT_S", "60"))   # 冲突确认超时，默认保旧
-PROFILE_MAX_CONFLICTS_PER_TURN = int(os.getenv("PROFILE_MAX_CONFLICTS_PER_TURN", "3"))  # 一轮最多提醒多少条冲突
+PROFILE_FIELDS = ["name", "preferences", "occupation"]            # 代码常量，不读环境变量
+PROFILE_CONFLICT_TIMEOUT_S = int(os.getenv("PROFILE_CONFLICT_TIMEOUT_S", "60"))
+PROFILE_MAX_CONFLICTS_PER_TURN = int(os.getenv("PROFILE_MAX_CONFLICTS_PER_TURN", "3"))
 ```
 
-### 16.13 本期范围（不上向量库）
+比原设计多了 `MEMORY_PERSIST`：自测脚本与 CI 需要一个**不碰真实记忆目录**的开关，
+且公共机器上跱 demo 也不应该把别人的画像写到盘上。
 
-- [ ] 接口：`MemoryRetriever` / `MemoryHit` / `MemoryQuery` 抽象（不接向量）
-- [ ] 实现：`AllMemoryRetriever`（全量拼接）
-- [ ] 实现：`UserProfile` 数据类（key/value，沉淀于 `long_term.json`）
-- [ ] 改造：`Session.build_messages` 接入 profile 作为系统人设贴片
-- [ ] 新增：WS 消息类型 `profile_conflict` / `profile_resolve`（服务端下发 + 客户端响应）
-- [ ] 新增：前端确认卡 UI（带新/旧值 + 原句子，超时可选 5s 提醒）
-- [ ] 改造：`maybe_summarize` 后同步生成 pending profile diffs，随下轮问题一起下发
-- [ ] 改造：`Session` 加 `apply_profile_diff(accept/reject)`，超时未响应则保旧
-- [ ] 改造：`maybe_summarize` 提炼提示词拆为「摘要+profile」两部分
-- [ ] 实现：`FileStore` 持久化（sessions/*.json + long_term.json）
-- [ ] 改造：`ConversationManager` 接口不变，内部接入存储，含 `clear()` 同步删除磁盘
-- [ ] `.gitignore` 补一行 `backend/data/`
-- [ ] README 补一句：「个人记忆不走 git，公共机器不要用」
+### 16.14 本期范围（不上向量库）—— **已全部完成**
+
+- [x] 接口：`MemoryRetriever` / `MemoryHit` / `MemoryQuery` 抽象 → `backend/memory/types.py`
+- [x] 实现：`AllMemoryRetriever`（全量拼接，超限先丢摘要）→ `backend/memory/retriever.py`
+- [x] 实现：`UserProfile` 与 `ProfileConflict` 数据类 → `backend/memory/profile.py`
+- [x] 改造：`Session.build_messages` 经检索器接入 profile 贴片 → `backend/pipeline/conversation.py`
+- [x] 新增：WS 消息 `profile_conflict` / `profile_resolve` / `profile_resolved` → `server.py` + `server_app/dialog.py`（定义见第 5 章）
+- [x] 新增：前端确认卡 UI → `frontend/src/profile_card.js` + `index.html` 的 `#profileCards`
+- [x] 改造：`maybe_summarize` 同步产出 pending diffs，于本轮 `llm_done` 后下发
+- [x] 改造：`resolve_conflict(accept/reject)`，超时/重启均**保旧**
+- [x] 改造：提炼提示词拆为「摘要 + profile」双字段 JSON，并带**坏 JSON 降级为纯文本摘要**
+- [x] 实现：`FileStore` 持久化（原子写 / 坏文件降级 / 路径穿越防护）→ `backend/memory/store.py`
+- [x] 改造：`ConversationManager` 内部接存储，`clear()` 同步删盘，`_gc()` 踢出前先落盘
+- [x] `.gitignore` 补 `backend/data/`
+- [x] README 补「个人记忆不走 git」
+- [x] 自测：`scripts/check_memory.py`（67 项断言）已接入 CI 的 `python-syntax` job
+- [x] 修复：反思链路因单例缺失静默失效的 bug（详见 16.11）
 
 ## 17. 远程访问与部署（cloudflared 隧道）
 

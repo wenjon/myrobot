@@ -63,8 +63,21 @@ def log_context(session, messages, user_text: str, who: str = '') -> None:
         role = {'system': 'SYS', 'user': 'U', 'assistant': 'BOT'}.get(m['role'], m['role'])
         content = m["content"].replace("\n", " ")
         body.append(f'  {i:>2}. [{role}] {_shorten(content)}')
+    # 长期记忆摘要（L3）
     if session.summary:
         body.append(f'[summary] {session.summary}')
+    # 用户画像（L3）：它已经拼在上面的 SYS 里，但 SYS 太长会被截断，
+    # 所以单独再打一行，方便确认「机器人到底记住了我的什么」。
+    try:
+        profile_text = session.profile.as_prompt_text()
+    except Exception:  # noqa: BLE001  日志不能因为取画像失败而拘累主流程
+        profile_text = ''
+    if profile_text:
+        body.append(f'[profile] {profile_text}')
+    # 待用户确认的画像冲突数量（B 方案）
+    pending = len(getattr(session, 'pending_conflicts', {}) or {})
+    if pending:
+        body.append(f'[profile-pending] {pending} 条画像变更待用户确认')
     body.append('-' * 70)
     LOGGER.emit('\n'.join(body))
 

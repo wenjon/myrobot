@@ -1,10 +1,14 @@
-﻿__pycache__/
+__pycache__/
 *.pyc
 *.log
 *.wav
 .venv/
 node_modules/
 backend/logs/
+# 本机记忆落盘（含用户画像等个人信息，绝不入库，详见 docs 第 16.9）
+backend/data/
+# 临时调试脚本目录
+.scratch/
 context.log
 
 # 本机密钥与私有配置（.env.example 是可提交的模板）

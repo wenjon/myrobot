@@ -1,7 +1,8 @@
-﻿import { createHead3D } from './head3d.js';
+import { createHead3D } from './head3d.js';
 import { connect } from './ws.js';
 import { speak, cancel, softStop } from './tts.js';
 import { visemeForChar, CLOSED } from './viseme.js';
+import { createProfileCards } from './profile_card.js';
 
 const canvas = document.getElementById('face');
 const logEl = document.getElementById('log');
@@ -10,6 +11,7 @@ const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
 const interruptBtn = document.getElementById('interrupt');
 const newBtn = document.getElementById('newchat');
+const profileCardsEl = document.getElementById('profileCards');
 
 // 会话 ID 持久化：刷新/重连不丢记忆
 let sessionId = localStorage.getItem('robot_session') || '';
@@ -60,6 +62,9 @@ const EMOTION_SET = new Set(['平静', '开心', '悲伤', '生气', '惊讶', '
 const WS_PROTO = location.protocol === 'https:' ? 'wss:' : 'ws:';
 const WS_URL = `${WS_PROTO}//${location.host}/ws`;
 
+// 画像冲突确认卡：用闭包延迟取 ws，因为 ws 在下面才定义。
+const profileCards = createProfileCards(profileCardsEl, (payload) => ws.send(payload));
+
 const ws = connect(WS_URL, {
   onOpen: () => { statusEl.textContent = '已连接'; statusEl.className = 'ok'; ws.send({ type: 'hello', session: sessionId }); },
   onClose: () => { statusEl.textContent = '断开，重连中…'; statusEl.className = 'bad'; },
@@ -87,8 +92,13 @@ const ws = connect(WS_URL, {
       log('bot', '[出错] ' + msg.message);
     } else if (msg.type === 'session') {
       sessionId = msg.session; localStorage.setItem('robot_session', sessionId);
+    } else if (msg.type === 'profile_conflict') {
+      // 服务端提炼出的画像变更与旧值冲突，弹卡让用户拍板（docs § 16.8）
+      profileCards.show(msg);
+    } else if (msg.type === 'profile_resolved') {
+      profileCards.resolved(msg);
     } else if (msg.type === 'cleared') {
-      logEl.innerHTML = ''; statusEl.textContent = '已连接（新对话）';
+      logEl.innerHTML = ''; profileCards.clearAll(); statusEl.textContent = '已连接（新对话）';
     } else if (msg.type === 'interrupted') {
       // 服务端自动打断（barge-in）：做自然收尾——声音渐弱 + 切“我在听”倾听表情。
       enterListening();

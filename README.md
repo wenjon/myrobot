@@ -3,15 +3,17 @@
 基于《机器人头部交互式对话全链路技术方案（流式低延迟架构正式版）》的**纯软件模拟**实现。
 无需物理零件，用浏览器里的 **Three.js 3D 数字人**替代物理伺服头部，跑通全链路流式对话。
 
-链路：`文本/语音输入 → (ASR) → LLM(Ark / llama.cpp / Ollama) → 文本解析中央调度(+工具调用) → TTS(Web Speech) → 3D viseme 口型/表情`
+链路：`文本/语音输入 → (ASR) → 记忆拼接(滑动窗口+摘要+用户画像) → LLM(Ark / llama.cpp / Ollama) → 文本解析中央调度(+工具调用) → TTS(Web Speech) → 3D viseme 口型/表情`
 
 ## 本地自检
 
-推送前可以先本机跑一遗（与 CI 完全一致的三项检查）：
+推送前可以先本机跑一遗（与 CI 完全一致的检查）：
 
 ```powershell
 python -m compileall -q backend/ scripts/          # Python 语法
 python scripts/check_no_hardcoded_secrets.py       # 密钥硬编码扫描
+python scripts/check_tool_schemas.py               # 工具 JSON Schema 自检
+python scripts/check_memory.py                     # 记忆模块自检（67 项断言）
 node --check frontend/src/main.js                  # 前端 JS 语法
 ```
 
@@ -32,6 +34,22 @@ copy .env.example .env
 - `backend/config.py` 启动时自动读取根目录 `.env`；**已导出的真实环境变量优先级更高**。
 - 服务启动时会自检：缺 `ARK_API_KEY` 或 `TAVILY_API_KEY` 会在控制台打印警告，但不阻断启动。
 - 完全不想用云端 LLM？把 `.env` 里改成 `LLM_PROVIDER=llamacpp`（llama.cpp 的 OpenAI 兼容服务）或 `LLM_PROVIDER=ollama` 即可走本地模型，无需任何密钥。
+
+## 记忆与隐私（重要）
+
+机器人会把对话记忆写到本机：
+
+```
+backend/data/memory/
+├─ sessions/<session_id>.json   滑动窗口历史 + 会话摘要
+└─ long_term.json              跳会话的用户画像（称呼 / 偏好 / 职业）
+```
+
+- **个人记忆不走 git**：`backend/data/` 已被 `.gitignore` 忽略，不会被提交、也不要跳机拷贝。
+- **公共机器 / 展示场合**请设 `MEMORY_PERSIST=0`，这时全部记忆只在内存，重启就忘。
+- 想手动清空：删掉 `backend/data/memory/` 目录即可；或在页面上点「清空上下文」（会同步删盘）。
+- 机器人提炼到的画像变更（如「以后叫我老王」）不会默默生效：
+  与旧值冲突时前端会弹**确认卡**，你不拍板就**保旧**。设计缘由见 docs 第 16 章。
 
 ## 在另一台机器上继续开发
 
@@ -72,6 +90,8 @@ python backend\server.py
 - `ENABLE_THINKING`（默认 `0`）— Qwen3 深度思考开关；关掉后首句延迟从 ~4s 降到 ~0.7s
 - `OLLAMA_MODEL`（默认 `gemma4:12b`）
 - `OLLAMA_URL`、`PORT`、`SYSTEM_PROMPT`、`SENTENCE_MIN_LEN`、`SENTENCE_MAX_LEN`
+- 记忆：`MEMORY_PERSIST`（默认 `1`，设 `0` 则纯内存）、`MEMORY_DATA_DIR`、`MEMORY_FLUSH_EVERY_N_TURNS`（默认 `5`）、`MEMORY_MAX_LONG_TERM_CHARS`（默认 `2000`）
+- 画像冲突：`PROFILE_CONFLICT_TIMEOUT_S`（默认 `60`，超时保旧）、`PROFILE_MAX_CONFLICTS_PER_TURN`（默认 `3`）
 
 ## 交互
 - 输入中文回车发送；机器人流式逐句播报并做口型动画。
@@ -94,18 +114,21 @@ python backend\server.py
 | 打断策略与自然收尾 | 11 |
 | 所有配置项含义 | 13 |
 | 密钥管理 | 14 |
-| 记忆模块设计（尚未实现） | 16 |
+| 记忆分层 / 用户画像 / 持久化 | 16 |
 | 手机/外网访问与排障 | 17 |
 
 ## 目录
 - `docs/superpowers/specs/` — 设计规格（superpowers 流程产出）
+- `scripts/` — 静态自检：密钥扫描 / 工具 Schema / 记忆模块
 - `backend/` — FastAPI + WebSocket 流式后端
   - `pipeline/llm_client.py` — LLM 流式客户端（Ark / llama.cpp / Ollama 三选一）
   - `tools/schema.py` — 从函数签名+docstring 自动推导工具 JSON Schema
   - `pipeline/text_router.py` — 文本解析中央调度（清洗/分句/动作分流）
+  - `pipeline/conversation.py` — 上下文拼接（滑动窗口 + 摘要反思 + 用户画像）
+  - `memory/` — 记忆模块：`types.py` 抽象 / `profile.py` 用户画像与冲突 / `retriever.py` 检索 / `store.py` 原子写持久化
   - `server.py` — WS 编排 + 静态托管
 - `frontend/` — Three.js 3D 数字人（Ready Player Me 风格头像 + ARKit blendshape/Oculus viseme）
-  - `src/head3d.js` `src/tts.js` `src/viseme.js` `src/ws.js` `src/main.js`
+  - `src/head3d.js` `src/tts.js` `src/viseme.js` `src/ws.js` `src/main.js` `src/profile_card.js`（画像确认卡）
 
 ## 与原方案的对应 & 简化
 | 原方案环节 | Demo 实现 | 说明 |

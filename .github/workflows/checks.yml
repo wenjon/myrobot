@@ -39,6 +39,12 @@ jobs:
         # 而错误只会在用户真的触发该工具时才报 TypeError，所以在 CI 提前卡住。
         run: python scripts/check_tool_schemas.py
 
+      - name: 记忆模块自检
+        # 第 16 章记忆模块：画像合并/冲突人工确认/反思解析/磁盘持久化。
+        # 用假 summarizer 跑通反思链路，**不请求 LLM、不需 API Key**；
+        # 自检内部把 MEMORY_DATA_DIR 指到临时目录，不会碰真实记忆。
+        run: python scripts/check_memory.py
+
       - name: 关键模块可导入自检
         # 比 compileall 更进一步：真正 import 一次，能捕到循环引用 / 笔误的模块名。
         # 不导入 server.py（它会初始化日志与工具，属于运行时行为）。
@@ -85,7 +91,7 @@ jobs:
         # 是直接 vendored 的三方库，不归我们维护，排除。
         # --check 只验语法，不执行（这些文件依赖浏览器 API，在 node 里跑不起来）。
         run: |
-          for f in frontend/src/main.js frontend/src/ws.js frontend/src/tts.js frontend/src/viseme.js frontend/src/head3d.js; do
+          for f in frontend/src/main.js frontend/src/ws.js frontend/src/tts.js frontend/src/viseme.js frontend/src/head3d.js frontend/src/profile_card.js; do
             echo "checking $f"
             node --check "$f"
           done

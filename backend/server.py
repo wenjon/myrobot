@@ -29,7 +29,7 @@ from config import (
 )
 from pipeline.llm_client import stream_chat, chat_once
 from pipeline.text_router import route
-from pipeline.conversation import ConversationManager
+from pipeline.conversation import conversations
 from pipeline.agent import agent_stream
 from pipeline.turn_policy import classify_incoming
 from tools import REGISTRY, RESOURCES, load_all
@@ -42,6 +42,7 @@ from tools import REGISTRY, RESOURCES, load_all
 from server_app.dialog import run_dialog as _run_dialog_real
 from server_app.logging import get_logger
 from server_app.notify import notify_interrupted as _notify_interrupted
+from server_app.notify import send_json as _send_json
 from server_app.peers import format_peer
 
 # ---------------------------------------------------------------------
@@ -63,8 +64,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Robot Head Demo", lifespan=lifespan)
-# 全局唯一的会话管理器：按 session_id 维护每个用户的多轮历史。
-conversations = ConversationManager()
+# 会话管理器是 **pipeline.conversation 里的全局单例**，不在这里新建。
+# 为什么：server_app/dialog.py 在反思环节也要拿同一个管理器，
+# 两边各建一个的话记忆会分家（这曾导致摘要功能静默失效）。
 
 
 # =====================================================================
@@ -77,6 +79,9 @@ _emit = LOGGER.emit  # 保留本名以便迁移阶段少改动原有代码
 
 # 工具框架接入日志系统，并在启动时自动发现/加载所有工具。
 REGISTRY.set_logger(_emit)
+# 记忆模块（含 FileStore）也接入同一套日志，便于在控制台看到
+# 「从磁盘恢复了多少条历史 / 画像合并了什么 / 冲突等确认」。
+conversations.set_logger(_emit)
 _loaded_tools = load_all(_emit)
 _emit(f"[启动] 已加载工具: {[t.name for t in REGISTRY.all()]}")
 
@@ -138,8 +143,9 @@ async def _run_dialog(ws, session, text, cancel, who=""):
 # =====================================================================
 # ---------------------------------------------------------------------
 # WS 协议总览（完整定义见 docs/.../05_*）：
-#   C -> S: hello / user_message / interrupt / clear / ping
-#   S -> C: session / sentence / action / status / llm_done / error / cleared / interrupted
+#   C -> S: hello / user_message / interrupt / clear / ping / profile_resolve
+#   S -> C: session / sentence / action / status / llm_done / error / cleared /
+#           interrupted / profile_conflict / profile_resolved
 # 连接生命周期： accept -> 绑定会话 -> 开 worker -> 处理 -> 优雅关闭
 # ---------------------------------------------------------------------
 @app.websocket("/ws")
@@ -233,6 +239,29 @@ async def ws_endpoint(ws: WebSocket):
                 _drain_queue()
                 conversations.clear(session.id)
                 await ws.send_text(json.dumps({"type": "cleared"}, ensure_ascii=False))
+                continue
+
+            # ---- 画像冲突确认（B 方案，docs § 16.8）----
+            # 前端确认卡点「确认/拒绝」后会发这个帧。不走对话队列：
+            # 它只改记忆、不触发 LLM，即使数字人正在说话也能立即处理。
+            if mtype == "profile_resolve":
+                cid = (msg.get("conflict_id") or "").strip()
+                action = (msg.get("action") or "").strip()
+                accept = action == "accept"
+                c = session.resolve_conflict(cid, accept)
+                if c is None:
+                    # 未知/已过期的 id：可能是用户隔了很久才点，或重复提交
+                    _emit(f"[记忆 #{conn_id}] profile_resolve 未知或已过期的 conflict_id={cid!r}")
+                else:
+                    _emit(f"[记忆 #{conn_id}] 画像冲突已{'接受' if accept else '拒绝'}: "
+                          f"{c.field_name} {c.old_value!r} -> {c.new_value!r}")
+                # 无论成功与否都回一帧，让前端能销毁确认卡（不致于永久悬在那里）
+                await _send_json(ws, {
+                    "type": "profile_resolved",
+                    "conflict_id": cid,
+                    "action": "accept" if accept else "reject",
+                    "ok": c is not None,
+                })
                 continue
 
             # ---- 普通用户消息：按轮次策略决定「继续说 / 打断 / 排队」----
