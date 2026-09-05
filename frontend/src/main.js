@@ -1,6 +1,6 @@
 import { createHead3D } from './head3d.js';
 import { connect } from './ws.js';
-import { speak, cancel, softStop } from './tts.js';
+import { speak, cancel, softStop, ttsReady, currentEngine, currentVoice, setVoice } from './tts.js';
 import { visemeForChar, CLOSED } from './viseme.js';
 import { createProfileCards } from './profile_card.js';
 
@@ -113,7 +113,12 @@ const WS_URL = `${WS_PROTO}//${location.host}/ws`;
 const profileCards = createProfileCards(profileCardsEl, (payload) => ws.send(payload));
 
 const ws = connect(WS_URL, {
-  onOpen: () => { statusEl.textContent = '已连接'; statusEl.className = 'ok'; ws.send({ type: 'hello', session: sessionId }); },
+  onOpen: () => {
+    statusEl.textContent = '已连接';
+    statusEl.className = 'ok';
+    ws.send({ type: 'hello', session: sessionId });
+    ttsReady.then(() => console.log(`[TTS] 引擎=${currentEngine()} 音色=${currentVoice()}`));
+  },
   onClose: () => { statusEl.textContent = '断开，重连中…'; statusEl.className = 'bad'; },
   onMessage: (msg) => {
     if (msg.type === 'sentence') {
@@ -168,6 +173,7 @@ function sendMessage() {
 const exprTestEl = document.getElementById('exprTest');
 function buildDebugPanel(h) {
   if (!exprTestEl) return;
+  buildVoicePicker();
   const add = (label, fn) => {
     const b = document.createElement('button');
     b.textContent = label;
@@ -176,6 +182,31 @@ function buildDebugPanel(h) {
   };
   for (const name of h.expressionNames()) add(name, () => h.setExpression(name));
   for (const name of ACTION_KEYS.slice().sort()) add('▸' + name, () => dispatchAction(h, name));
+}
+
+// 音色选择器：Edge 神经语音有 14 个中文音色，听感差别很大，
+// 放个下拉框现场切换比改配置重启方便得多（仅影响当前页面，不改后端默认值）。
+function buildVoicePicker() {
+  if (currentEngine() !== 'edge') return;
+  const sel = document.createElement('select');
+  sel.id = 'voiceSel';
+  sel.title = '语音音色';
+  fetch('/api/tts/voices?locale=zh')
+    .then((r) => r.json())
+    .then((d) => {
+      if (!d.ok) return;
+      for (const v of d.voices) {
+        const o = document.createElement('option');
+        o.value = v.name;
+        const tag = [...(v.personalities || []), ...(v.categories || [])].join('/');
+        o.textContent = `${v.name.replace('zh-', '')}${tag ? ' · ' + tag : ''}`;
+        if (v.name === currentVoice()) o.selected = true;
+        sel.appendChild(o);
+      }
+    })
+    .catch(() => {});
+  sel.onchange = () => setVoice(sel.value);
+  exprTestEl.appendChild(sel);
 }
 
 sendBtn.onclick = sendMessage;

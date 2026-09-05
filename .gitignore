@@ -9,6 +9,9 @@ backend/logs/
 backend/data/
 # 临时调试脚本目录
 .scratch/
+# TTS 音色试听样本（scripts/tts_preview.py 生成，纯本地产物）
+voice_preview/
+*.mp3
 context.log
 
 # 本机密钥与私有配置（.env.example 是可提交的模板）

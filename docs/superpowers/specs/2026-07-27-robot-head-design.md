@@ -24,15 +24,15 @@
 | 环节 | 方案 | 说明 |
 |------|------|------|
 | LLM | **三选一**：`ark`（火山引擎，云端，默认）/ `llamacpp`（本地 llama.cpp server，OpenAI 兼容）/ `ollama`（本地 `/api/chat`） | 供应商可切换（`config.LLM_PROVIDER`）；详见 2.1 |
-| TTS | 浏览器 **Web Speech API** (`SpeechSynthesis`) | 完全离线、内置中文语音、自带 `boundary` 事件（字/词时间戳），零依赖 |
-| 口型对齐 | TTS `boundary` 事件时间戳 → 拼音/音素 → viseme | 前端实时驱动，符合“时间戳=基准时钟” |
+| TTS | **Edge 神经语音**（`edge-tts`，服务端合成）+ 浏览器 Web Speech 兜底 | 神经语音自然度远高于本机 SAPI；返回逐字时间轴用于口型；失败自动降级，详见第 18 章 |
+| 口型对齐 | Edge WordBoundary 逐字时间轴（或 Web Speech `boundary` 事件）→ 拼音/音素 → viseme | 前端实时驱动，符合“时间戳=基准时钟” |
 | 虚拟头 | **Three.js 3D 数字人**（`avatar.glb`，GLTFLoader + 透视相机） | ARKit 52 blendshape 表情 + Oculus viseme 口型，WebGL 渲染 |
 | ASR | 浏览器 **Web Speech Recognition**（可选）+ 文本输入兜底 | 无麦克风也能跑；后续可替换 faster-whisper |
 | 后端 | **Python FastAPI + WebSocket** | 承载 LLM 流式转发 + 文本解析中央调度 |
 | 通信 | WebSocket 全双工流式 | 边收边推边出 |
 
 设计决策说明：
-- **为什么 TTS 放前端**：本机 edge-tts 取不到音频、SAPI COM 在当前环境不稳定。Web Speech API 离线可用且天然带时间戳，最适合 demo，避免卡壳。TTS 做成**可替换接口**，后续可切到 Piper/本地音素引擎。
+- **~~为什么 TTS 放前端~~**：初版因「本机 edge-tts 取不到音频」而把 TTS 放前端。**该结论已推翻**——问题实为 edge-tts ≥7 默认 `boundary="SentenceBoundary"`，一句只回一个 mark 显得「拿不到时间戳」；显式传 `WordBoundary` 即可。现默认走服务端 Edge 神经语音，Web Speech 保留为降级兜底。详见第 18 章。
 - **为什么 3D 而不是 Wav2Lip/SadTalker/MuseTalk**：后者都依赖 NVIDIA CUDA（本机是 AMD 显卡，ROCm 不支持 Windows），而且它们是「整段音频 → 出 mp4」的**离线批处理**，与本方案的低延迟/可打断目标相冲。Three.js 方案纯 WebGL 渲染，无需 GPU 推理，实时驱动口型与表情，集显也能跑。
 
 ### 2.1 三个 LLM 供应商的取舍
@@ -93,7 +93,7 @@ Qwen3 系列默认会先输出一大段**深度思考**（`reasoning_content`）
 4. `agent.agent_stream` 两阶段推理：先带工具清单探测，需要则执行工具（如 `web_search`）并回喂，最后**流式**生成答案（详见第 10 章）。
 5. `text_router.route` 增量清洗（去 emoji/markdown/思考内容），**智能分句**，识别行内标记 `[表情:...]`/`[动作:...]`。
 6. 每就绪一个短句 → 立刻经 WS 推给前端（`sentence`）；表情/动作用 `action` **提前下发**，使表情先于语音到位。
-7. 前端 `tts.js` 用 Web Speech 合成播报，`boundary` 事件按字触发 → `viseme.js` 算出口型权重 → `head3d.js` 驱动 blendshape 逐帧渲染。
+7. 前端 `tts.js` 向 `/api/tts` 取 Edge 神经语音音频 + 逐字时间轴（失败降级 Web Speech），播放时按 `currentTime` 查表触发 → `viseme.js` 算出口型权重 → `head3d.js` 驱动 blendshape 逐帧渲染。
 8. 本轮正常结束→`commit_turn` 入库 + 下发 `llm_done`；被打断→不入库并下发 `interrupted` 让前端做自然收尾。
 
 ## 4. 模块划分
@@ -130,7 +130,7 @@ Qwen3 系列默认会先输出一大段**深度思考**（`reasoning_content`）
 前端 `frontend/`
 - `index.html` — 页面（画布 + 输入区 + 状态）。
 - `src/ws.js` — WebSocket 客户端。
-- `src/tts.js` — Web Speech 合成 + `boundary` 时间戳 + `softStop`（渐弱软停）。
+- `src/tts.js` — 双后端语音合成：Edge 神经语音（`/api/tts`，逐字时间轴 + 预取）/ Web Speech 兜底，含 `softStop`（渐弱软停）。详见第 18 章。
 - `src/viseme.js` — 字/拼音 → viseme 权重映射。
 - `src/head3d.js` — Three.js 加载 GLB（ARKit 52 blendshape + Oculus viseme）：18 种表情 / 口型 / 注视与眨眼 / 颈骨分层转头 / 面部叠加动作 / 自发微动 / 「我在听」倾听表情。详见第 7 章。
 - `src/main.js` — 装配与事件流（含 `enterListening`）。
@@ -178,7 +178,7 @@ LLM 输出约定（system prompt 引导）:
 ## 7. 口型/表情映射（3D blendshape）
 
 ### 7.1 口型（viseme）
-- 链路：TTS `boundary` 字级时间戳 → `viseme.js` 求出目标 viseme → `head3d.js` 驱动 Oculus viseme blendshape。
+- 链路：TTS 字级时间戳（Edge WordBoundary 展开逐字 / Web Speech `boundary`）→ `viseme.js` 求出目标 viseme → `head3d.js` 驱动 Oculus viseme blendshape。
 - 中文按拼音韵母粗分口型类别：`a`(大张)、`o/u`(圆唇)、`e/i`(扁平)、`闭合`(m/b/p/静音)。
 - 无拼音库时用字符哈希兜底伪口型，保证动画连续（demo 级，非真音素级）。
 - 对外接口：`visemeForChar(ch)` / `visemeForText(text)` / `CLOSED`。
@@ -251,7 +251,7 @@ LLM 输出约定（system prompt 引导）:
 - 输入一句中文，数字人能**流式**逐句播报并做口型动画，首句可见延迟主观“较快”。
 - 口型与语音大致同步（demo 级，不追求 ≤120ms 硬指标）。
 - LLM 输出的 `[表情:x]` / `[动作:x]` 能驱动 18 种表情与头颈/注视/眨眼/面部叠加动作。
-- 前端 TTS 用浏览器 Web Speech，**不依赖外部语音服务**。
+- TTS 默认用 Edge 神经语音（服务端合成）；断网或未装 `edge-tts` 时自动降级浏览器 Web Speech，**不会哑掉**。
 
 ### 8.2 工具调用（第 10 章）
 - 问「现在几点」能调 `get_time` 并用口语回答。
@@ -290,7 +290,7 @@ LLM 输出约定（system prompt 引导）:
 - ~~记忆持久化与用户画像落地。~~ **已完成**，详见第 16 章（三层存储 + Profile 冲突人工确认 + 文件持久化）。
 
 待做：
-- TTS 换 Piper/本地音素引擎，拿真音素级时间戳（当前是拼音粗分 + 字级时间戳）。
+- ~~TTS 换 Piper/本地音素引擎~~ 已改为 Edge 神经语音（第 18 章）；若要完全离线 + 真音素级时间戳，仍可考虑 Piper（当前是拼音粗分 + 字级时间戳）。
 - ASR 换 faster-whisper 流式，后端做 VAD/AEC（当前依赖浏览器 Web Speech Recognition）。
 - 加入伺服时序补偿模块（当前为接口占位，无物理硬件）。
 - 全局时钟对齐、智能降级策略。
@@ -1092,3 +1092,92 @@ Expires: 0
 
 > 安全提醒：快速隧道是**公开可访问**的，任何拿到域名的人都能与你的数字人对话（并消耗你的 LLM 额度）。
 > 调试完毕及时关掉 cloudflared。需要长期公网服务应改用具名隧道 + 访问控制。
+
+---
+
+## 18. TTS 语音合成（双后端 + 自动降级）
+
+### 18.1 为什么换掉 Web Speech
+Windows 上浏览器 Web Speech 只能调用本机 SAPI 音色，实测仅 3 个中文音色
+（`Huihui` / `Kangkang` / `Yaoyao`），都是拼接式合成，机械感重、语调平。
+Edge TTS 走微软 Azure 神经网络语音，**免费、无需 API Key**，中文有 14 个音色，
+自然度高一个量级。
+
+初版规格里「本机 edge-tts 取不到音频」的结论是错的，真实原因见 18.4。
+
+### 18.2 架构
+```
+LLM 分句 ──▶ 前端 speak(text) ──▶ 入队即预取 POST /api/tts
+                                        │
+                       ┌────────────────┴────────────────┐
+                       │ backend/pipeline/tts_edge.py    │
+                       │  edge_tts.Communicate(          │
+                       │    boundary="WordBoundary")     │
+                       │  → mp3 chunks + WordBoundary    │
+                       │  → 词时长按字均分成逐字 marks   │
+                       └────────────────┬────────────────┘
+                                        ▼
+              {ok, audio(base64 mp3), mime, marks[], voice}
+                                        │
+   <audio> 播放 ──▶ rAF 按 currentTime 在 marks 上推进 ──▶ onBoundary({char})
+                                        ▼
+                          viseme.js ──▶ head3d.js 口型
+```
+
+- 后端：`backend/pipeline/tts_edge.py`（`synthesize` / `list_voices`）
+- 路由：`GET /api/tts/config`、`GET /api/tts/voices`、`POST /api/tts`
+- 前端：`frontend/src/tts.js`，对外接口与旧版完全一致
+  （`speak/cancel/softStop`），上层 `main.js` 的 `driveMouth` 无需感知用的哪套引擎。
+
+### 18.3 三个关键设计
+1. **口型时间轴取代 boundary 事件**：音频播放没有 `boundary` 事件，
+   改为拿服务端返回的 `marks`，在 `requestAnimationFrame` 里按 `audio.currentTime` 查表下发字符。
+   时间戳来自**真实合成结果**而非浏览器估算，精度反而更高，也不受浏览器差异影响。
+2. **预取（prefetch）**：Edge 单句合成约 0.5~1.7s。若等上一句播完才合成下一句，句间会有明显空档。
+   所以 `speak()` **入队时就发起请求**，Promise 挂在 `item.pending` 上，与当前句播放并行。
+3. **逐句降级而非整体降级**：任一句合成失败（断网 / 未装 edge-tts / 自动播放被拒）
+   只让**这一句**改用 Web Speech，后续句仍走 Edge。宁可音色差一点，也不能让数字人变哑。
+
+另外 `softStop`（被打断时的自然收尾）在 Edge 路径下能做**真正的音量渐弱**
+（`HTMLAudioElement.volume` 可写，分 8 步淡出）；Web Speech 受 API 限制只能延迟 cancel 近似。
+
+### 18.4 坑：edge-tts ≥ 7 默认不给词边界
+`edge_tts.Communicate` 的 `boundary` 参数默认值是 `"SentenceBoundary"`，
+一整句只回**一个** mark，口型全程只动一下。必须显式传 `boundary="WordBoundary"`：
+
+```python
+comm = edge_tts.Communicate(text, voice, boundary="WordBoundary", rate=..., pitch=...)
+```
+
+代码里对老版本做了 `TypeError` 兜底（老版本没这个参数，本身就按词回调）。
+
+还有一层：中文一个「词」常含 2~4 字（`你好`、`小柚`），整词一个 mark 同样会让口型偷懒。
+所以 `tts_edge.py` 把词时长**按字均分展开成逐字 mark**，并用 `text.find(word, cursor)`
+把 mark 映射回原文字符下标（`cursor` 单向前进，避免同一个字反复命中开头那次）。
+
+### 18.5 配置与音色挑选
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `TTS_ENGINE` | `edge` | `edge` 神经语音 / `web` 浏览器 Web Speech |
+| `TTS_VOICE` | `zh-CN-XiaoyiNeural` | 音色，共 14 个中文可选 |
+| `TTS_RATE` | `+8%` | 语速，相对量百分比 |
+| `TTS_PITCH` | `+10Hz` | 音高，单位 Hz |
+| `TTS_VOLUME` | `+0%` | 音量 |
+
+推荐音色：
+
+| 音色 | 特点 | 适用 |
+|---|---|---|
+| `zh-CN-XiaoyiNeural` | 活泼少女，Cartoon/Novel·Lively | **当前默认**，最贴合「小柚」人设 |
+| `zh-CN-XiaoxiaoNeural` | 温暖女声，News/Novel·Warm | 最稳最百搭 |
+| `zh-CN-YunxiaNeural` | 男童声·Cute | 想换可爱男声 |
+| `zh-CN-YunxiNeural` | 少年男声·阳光 | 男性人设 |
+| `zh-CN-liaoning-XiaobeiNeural` | 东北方言·幽默 | 整活 |
+
+挑选方式二选一：
+
+- 跑 `python scripts/tts_preview.py` 生成 9 个样本到 `voice_preview/`（含 `README.txt` 对应参数），
+  听完把参数写进 `.env` 重启后端。
+- 直接在页面 `#exprTest` 面板的下拉框里现场切换（仅影响当前页面，不改后端默认值）。
+
+`voice_preview/` 与 `*.mp3` 已在 `.gitignore` 中，音频不入库。

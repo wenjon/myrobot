@@ -53,6 +53,18 @@ ARK_BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/
 ARK_API_KEY = os.getenv("ARK_API_KEY", "")
 ARK_MODEL = os.getenv("ARK_MODEL", "ark-code-latest")
 
+# ---- TTS（语音合成）----
+# TTS_ENGINE=edge  用 Edge 神经语音（自然度高，需 pip install edge-tts，走网络）
+# TTS_ENGINE=web   用浏览器 Web Speech（离线可用，但 Windows 上只有 SAPI 老音色）
+# edge 合成失败时前端会自动降级到 web，不会哑掉。
+TTS_ENGINE = os.getenv("TTS_ENGINE", "edge")
+# 推荐音色：XiaoxiaoNeural(温暖) / XiaoyiNeural(活泼，适合"小柚"这类角色) / YunxiaNeural(男童声)
+TTS_VOICE = os.getenv("TTS_VOICE", "zh-CN-XiaoyiNeural")
+# rate/pitch/volume 用 Edge 的相对量语法，例："+10%" / "-5%" / "+20Hz"
+TTS_RATE = os.getenv("TTS_RATE", "+8%")
+TTS_PITCH = os.getenv("TTS_PITCH", "+10Hz")
+TTS_VOLUME = os.getenv("TTS_VOLUME", "+0%")
+
 # 智能分句参数
 SENTENCE_MIN_LEN = int(os.getenv("SENTENCE_MIN_LEN", "8"))
 SENTENCE_MAX_LEN = int(os.getenv("SENTENCE_MAX_LEN", "24"))

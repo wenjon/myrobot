@@ -19,19 +19,21 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 
 from config import (
     HOST, PORT, LLM_PROVIDER, OLLAMA_MODEL, ARK_MODEL, LOG_CONTEXT, CONTEXT_LOG_FILE,
     SHOW_REAL_IP, INTERRUPT_MODE,
+    TTS_ENGINE, TTS_VOICE, TTS_RATE, TTS_PITCH, TTS_VOLUME,
 )
 from pipeline.llm_client import stream_chat, chat_once
 from pipeline.text_router import route
 from pipeline.conversation import conversations
 from pipeline.agent import agent_stream
 from pipeline.turn_policy import classify_incoming
+from pipeline.tts_edge import TTSUnavailable, list_voices, synthesize
 from tools import REGISTRY, RESOURCES, load_all
 
 # server_app 拆出的业务辅助模块：
@@ -124,9 +126,57 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    """健康检查：确认服务在线并回报当前使用的模型名。"""
+    """健康检查：确认服务在线并回报当前使用的模型名与 TTS 配置。"""
     model = ARK_MODEL if LLM_PROVIDER == "ark" else OLLAMA_MODEL
-    return {"ok": True, "provider": LLM_PROVIDER, "model": model}
+    return {
+        "ok": True, "provider": LLM_PROVIDER, "model": model,
+        "tts": {"engine": TTS_ENGINE, "voice": TTS_VOICE,
+                "rate": TTS_RATE, "pitch": TTS_PITCH},
+    }
+
+
+# =====================================================================
+# TTS：Edge 神经语音合成
+# =====================================================================
+# 为什么放服务端而不是浏览器直连：edge-tts 是 WebSocket + 私有协议，
+# 浏览器侧有跨域限制；同时服务端合成才能把 WordBoundary 时间轴一起返回，
+# 用于精确驱动口型（Web Speech 的 boundary 事件在部分浏览器上根本不触发）。
+@app.get("/api/tts/config")
+async def tts_config():
+    """前端启动时拉一次，决定用 edge 还是降级到 Web Speech。"""
+    return {"engine": TTS_ENGINE, "voice": TTS_VOICE,
+            "rate": TTS_RATE, "pitch": TTS_PITCH, "volume": TTS_VOLUME}
+
+
+@app.get("/api/tts/voices")
+async def tts_voices(locale: str = "zh"):
+    """可用音色清单（调试/切换音色用）。"""
+    try:
+        return {"ok": True, "voices": await list_voices(locale)}
+    except TTSUnavailable as exc:
+        return {"ok": False, "error": str(exc), "voices": []}
+
+
+@app.post("/api/tts")
+async def tts(payload: dict = Body(...)):
+    """合成一句话，返回 base64 mp3 + 词边界时间轴。
+
+    失败时返回 ok=False 而不是抛 500：前端据此静默降级到 Web Speech，
+    宁可音色差一点也不能让数字人变哑巴。
+    """
+    try:
+        result = await synthesize(
+            payload.get("text", ""),
+            voice=payload.get("voice", ""),
+            rate=payload.get("rate", ""),
+            pitch=payload.get("pitch", ""),
+            volume=payload.get("volume", ""),
+        )
+        result["ok"] = True
+        return result
+    except TTSUnavailable as exc:
+        LOGGER.emit(f"[TTS] 合成失败，前端将降级 Web Speech: {exc}")
+        return {"ok": False, "error": str(exc)}
 
 
 # =====================================================================
