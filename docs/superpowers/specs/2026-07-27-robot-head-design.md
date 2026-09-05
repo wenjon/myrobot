@@ -177,75 +177,204 @@ LLM 输出约定（system prompt 引导）:
 - 不足阈值且未遇强标点时缓冲，遇强标点或超长即 flush。
 - 流结束时 flush 残留缓冲。
 
-## 7. 口型/表情映射（3D blendshape）
+## 7. 3D 数字人模型与表现系统
 
-### 7.1 口型（viseme）
-- 链路：TTS 字级时间戳（Edge WordBoundary 展开逐字 / Web Speech `boundary`）→ `viseme.js` 求出目标 viseme → `head3d.js` 驱动 Oculus viseme blendshape。
-- 中文按拼音韵母粗分口型类别：`a`(大张)、`o/u`(圆唇)、`e/i`(扁平)、`闭合`(m/b/p/静音)。
-- 无拼音库时用字符哈希兜底伪口型，保证动画连续（demo 级，非真音素级）。
-- 对外接口：`visemeForChar(ch)` / `visemeForText(text)` / `CLOSED`。
+> 需求对应：PRD §3.2 数字人模型与表现
 
-### 7.2 表情（ARKit blendshape 组合）
-`head3d.js` 的 `EXPR` 表定义了 **18 种**表情，每种是一组 blendshape 权重的叠加。
-表情是**持续状态**，一直保持到下一次 `[表情:x]` 切换。
+本章覆盖数字人「看得见的部分」：模型资产要求、渲染管线、表情 / 动作 / 注视 / 口型 / 自发微动六个子系统，以及换模型的兼容性规则。
 
-| 表情 | 主要 blendshape |
-|---|---|
-| 平静 | （全零，基准态） |
-| 开心 | `mouthSmile*` 0.8、`mouthDimple*` 0.4、`cheekSquint*` 0.4、`eyeSquint*` 0.2 |
-| 悲伤 | `mouthFrown*` 0.7、`browInnerUp` 0.7、`mouthShrugLower` 0.3 |
-| 生气 | `browDown*` 0.9、`noseSneer*` 0.5、`mouthPress*` 0.5、`jawForward` 0.2 |
-| 惊讶 | `browInnerUp` 0.8、`browOuterUp*` 0.7、`eyeWide*` 0.8、`jawOpen` 0.35 |
-| 疑惑 | `browInnerUp` 0.5、`browOuterUpLeft` 0.6、`mouthLeft` 0.4、`jawLeft` 0.1 |
-| 害羞 | `mouthSmile*` 0.45、`cheekSquint*` 0.6、`eyeSquint*` 0.4、`mouthShrugUpper` 0.2 |
-| 调皮 | `mouthSmileLeft` 0.75 / `Right` 0.3（不对称坏笑）、`tongueOut` 0.25 |
-| 无语 | `mouthShrugUpper` 0.6、`mouthClose` 0.25、`mouthRight` 0.2、`jawRight` 0.1 |
-| 思考 | `browOuterUpLeft` 0.55、`mouthRollLower` 0.45、`mouthLeft` 0.25 |
-| 尴尬 | `mouthStretch*` 0.6、`browInnerUp` 0.55、`eyeSquint*` 0.45（苦笑） |
-| 得意 | `mouthSmile*` 0.7、`jawForward` 0.3、`browDown*` 0.25 |
-| 委屈 | `mouthFrown*` 0.6、`browInnerUp` 0.85、`mouthPucker` 0.4 |
-| 惊恐 | `eyeWide*` 1.0、`browInnerUp` 0.95、`jawOpen` 0.6、`mouthStretch*` 0.4 |
-| 厌恶 | `noseSneer*` 0.8、`mouthUpperUp*` 0.6/0.45、`eyeSquintLeft` 0.55 |
-| 困倦 | `eyeBlink*` 0.55（半闭）、`jawOpen` 0.2、`mouthLowerDown*` 0.2 |
-| 撒娇 | `cheekPuff` 0.6、`mouthPucker` 0.65、`browInnerUp` 0.5 |
-| 期待 | `eyeWide*` 0.55、`mouthSmile*` 0.55、`browInnerUp` 0.45、`jawOpen` 0.12 |
+### 7.1 模型资产规范
 
-- 由 `action` 消息（`{"type":"action","action":"表情","value":"开心"}`）驱动，**插值过渡**避免突变。
-- 切表情时先把 `EXPR_KEYS` 全体归零再套新值，避免上一个表情残留（如「惊恐」切「平静」眼睛还睁着）。
-- 额外的「我在听」倾听表情（`setListening`）不属于上表，是被打断时的自然收尾，详见 11.4。
+当前默认模型：`frontend/src/avatar.glb`（Ready Player Me 标准头像，2.74MB，13317 三角面）。
 
-### 7.3 动作系统（非 blendshape 表情的其余能力）
-除表情外还有三类**一次性动作**，由 `[动作:x]` 触发，`main.js` 的 `ACTION_MAP` 表驱动分发：
-
-| 类别 | 动作 | 实现 |
+| 项 | 要求 | 说明 |
 |---|---|---|
-| 头颈 | 点头、摇头、歪头 | 正弦包络叠加到 `Neck`(60%) + `Head`(40%) 两根骨骼的欧拉角 |
-| 注视 | 看左、看右、看上、看下、环视、对视 | 8 个 `eyeLook*` blendshape + `LeftEye`/`RightEye` 骨骼微转，头颈随后跟上 |
-| 眨眼 | 眨眼、眨左眼、眨右眼 | `eyeBlinkLeft/Right`，单眼眨（wink）时只压一侧 |
-| 面部叠加 | 挑眉、单挑眉、皱眉、鼓腮、撅嘴、吐舌、咬唇、努嘴 | `OVERLAYS` 表，在当前表情基准值之上做 `0 → peak → 0` 的正弦包络，结束后回落到基准 |
+| 格式 | `.glb`（GLTF 2.0 二进制） | Three.js `GLTFLoader` 直接加载 |
+| 口型 | **必须** 15 个 Oculus viseme | 缺任何一个，那个音的口型就出不来。这是硬门槛 |
+| 表情 | 推荐 52 个 ARKit blendshape | 52 个才能支撑全部 18 种表情 + 注视 + 眨眼 |
+| 骨骼 | 必须 `Head` + `Neck` | 没有的话转头只能转整个 root，很假 |
+| 眼球骨 | 推荐 `LeftEye` + `RightEye` | 注视时瞳孔一起转才真实；没有也能靠 blendshape 凑 |
+| 躯干骨 | 推荐 `Spine1` | 呼吸起伏用，没有不影响核心功能 |
+| 面数 | ≤ 15K 三角面 | 集显也要 60fps |
+| 体积 | ≤ 8 MB | 首屏加载可接受 |
+| 动画 | 可选 | 当前不用预制动画，全部程序化生成 |
 
-三个设计要点：
+**验证工具**：`python scripts/probe_avatar.py 模型.glb`，会输出 viseme 匹配率、ARKit 数量、关键骨骼、面数、体积。
+预览页 `/app/preview.html` 则直接加载试驱，可以肉眼验证。
 
-1. **分层而非覆盖**：注视系统独占 `eyeLook*`，眨眼独占 `eyeBlink*`，表情用其余 42 个，
-   叠加动作则记录 `exprBase` 后做增量相加。任何两层同时生效都不会互相抹掉。
-2. **转颈骨而不是转 root**：早期实现旋转整个 `root`，视觉上是「整个人歪了」；
-   现在按 6:4 分给 `Neck`/`Head`，才是「人在转头」。所有旋转都基于 `rest` 静止姿态做增量，不会累积漂移。
-3. **无指令时的自发微动**：随机扫视（saccade，1.2~3.8s 一次）+ 头部低频摆动 + `Spine1` 呼吸起伏（约 15 次/分）。
-   这三项与语义无关，但去掉了「雕像感」，是性价比最高的「活着」感来源。
+### 7.2 渲染管线（head3d.js）
 
-### 7.4 覆盖率与自定义边界
-`avatar.glb` 共 **67 个 blendshape** = 15 viseme + 52 ARKit，另有 67 根骨骼、0 个预制动画
-（Ready Player Me 标准骨架，动作全部程序化生成）。当前 **52/52 个 ARKit blendshape 已全部用上**。
+单文件 `frontend/src/head3d.js`，约 400 行，导出一个工厂函数 `createHead3D(canvas, avatarUrl)`。
 
-新增一种表情/动作需**同步三处**，否则前端会把标记降级丢弃：
+```
+Three.js Scene
+├── PerspectiveCamera（FOV 24°，对准脸部中心）
+├── HemisphereLight（环境光，强度 1.2）
+├── DirectionalLight × 2（主光 / 补光，模拟三点布光简化版）
+└── GLTF model（root）
+     ├── 4 个带 morph 的 mesh（EyeLeft / EyeRight / Head / Teeth）
+     └── 67 根骨骼（RPM 标准骨架）
+```
+
+相机对准用 `Head` 骨骼世界坐标 + 0.08m 偏移，而不是包围盒中心——
+因为包围盒中心经常落在口腔里。
+
+### 7.3 表情系统（18 种）
+
+表情是**持续状态**，保持到下一次切换。每种表情 = 一组 blendshape 权重的叠加。
+
+| 表情 | 主要 blendshape 组合 | 设计要点 |
+|---|---|---|
+| 平静 | （全零） | 基准态 |
+| 开心 | `mouthSmile*` 0.8 + `mouthDimple*` 0.4 + `cheekSquint*` 0.4 | 酒窝让笑容立体，不只拉嘴角 |
+| 悲伤 | `mouthFrown*` 0.7 + `browInnerUp` 0.7 + `mouthShrugLower` 0.3 | 嘴角下垂 + 眉心高抬 + 下唇下沉 |
+| 生气 | `browDown*` 0.9 + `noseSneer*` 0.5 + `mouthPress*` 0.5 + `jawForward` 0.2 | 眉压低 + 鼻翼皱 + 抿嘴 + 下巴前伸 |
+| 惊讶 | `browInnerUp` 0.8 + `browOuterUp*` 0.7 + `eyeWide*` 0.8 + `jawOpen` 0.35 | 眉抬 + 眼睁 + 嘴微张 |
+| 疑惑 | `browInnerUp` 0.5 + `browOuterUpLeft` 0.6 + `mouthLeft` 0.4 + `jawLeft` 0.1 | 单侧抬眉 + 嘴歪向一侧，经典困惑脸 |
+| 害羞 | `mouthSmile*` 0.45 + `cheekSquint*` 0.6 + `eyeSquint*` 0.4 | 浅笑 + 脸颊收紧 + 眼眯 |
+| 调皮 | `mouthSmileLeft` 0.75 / `Right` 0.3 + `tongueOut` 0.25 | 不对称坏笑 + 吐舌尖 |
+| 无语 | `mouthShrugUpper` 0.6 + `mouthClose` 0.25 + `mouthRight` 0.2 + `jawRight` 0.1 | 撇嘴 + 闭唇 + 下巴偏，"随便吧"感 |
+| 思考 | `browOuterUpLeft` 0.55 + `mouthRollLower` 0.45 + `mouthLeft` 0.25 | 单侧抬眉 + 咬下唇 + 嘴角偏移 |
+| 尴尬 | `mouthStretch*` 0.6 + `browInnerUp` 0.55 + `eyeSquint*` 0.45 | 苦笑 = 嘴横拉 + 眉心抬 + 眼眯 |
+| 得意 | `mouthSmile*` 0.7 + `jawForward` 0.3 + `browDown*` 0.25 + `eyeSquint*` 0.4 | 笑 + 下巴前伸 + 眉压（自信的坏笑） |
+| 委屈 | `mouthFrown*` 0.6 + `browInnerUp` 0.85 + `mouthPucker` 0.4 | 嘴角下垂 + 眉心高抬 + 撅嘴 |
+| 惊恐 | `eyeWide*` 1.0 + `browInnerUp` 0.95 + `jawOpen` 0.6 + `mouthStretch*` 0.4 | 眼全睁 + 眉全抬 + 嘴大张 + 嘴横拉 |
+| 厌恶 | `noseSneer*` 0.8 + `mouthUpperUp*` 0.6/0.45 + `eyeSquintLeft` 0.55 | 鼻翼皱 + 上唇抬 + 单眼眯 |
+| 困倦 | `eyeBlink*` 0.55 + `jawOpen` 0.2 + `mouthLowerDown*` 0.2 | 半闭眼 + 嘴微张 |
+| 撒娇 | `cheekPuff` 0.6 + `mouthPucker` 0.65 + `browInnerUp` 0.5 | 鼓腮 + 撅嘴 + 眉心抬 |
+| 期待 | `eyeWide*` 0.55 + `mouthSmile*` 0.55 + `browInnerUp` 0.45 + `jawOpen` 0.12 | 眼睁大 + 微笑 + 眉微抬 |
+
+设计原则：
+
+1. **不对称是关键**：真人表情很少左右完全一致。单侧抬眉、单侧嘴角、单侧眯眼，这些细节是可信度的来源。
+2. **切表情时全量归零再叠加**：`EXPR_KEYS` 集合里的每个 blendshape 都先置 0 再设新值，避免残留（如「惊恐」切「平静」时眼睛还睁着）。
+3. **平滑插值**：所有 blendshape 目标值到当前值之间用 `12*dt` 的速度逼近，不是瞬间切换。
+
+### 7.4 动作系统（21 种一次性动作）
+
+动作是**一次性的**，触发后自动回位。分四类：
+
+#### 7.4.1 头颈动作
+- **点头**：正弦包络绕 X 轴，幅度 ±0.18 rad，周期 0.9s
+- **摇头**：正弦包络绕 Y 轴，幅度 ±0.18 rad，周期 0.9s
+- **歪头**：绕 Z 轴单侧倾，幅度 0.26 rad
+
+**关键：转颈骨，不是转 root**。按 6:4 分给 `Neck` / `Head` 两根骨骼，且基于 `rest` 静止姿态做增量（不会累积漂移）。
+早期实现旋转整个 `root`，视觉上是「整个人歪了」；分层后才是「人在转头」。
+
+#### 7.4.2 注视动作
+- 看左 / 看右 / 看上 / 看下 / 环视 / 对视
+
+注视用 8 个 `eyeLook*` blendshape + `LeftEye`/`RightEye` 骨骼微转共同实现：
+- 水平：看画面右侧 = 左眼 `eyeLookOut` + 右眼 `eyeLookIn`（左右眼 In/Out 镜像）
+- 垂直：`eyeLookUp*` / `eyeLookDown*`
+- 骨骼微转幅度约 ±13°，让高光/瞳孔位移更真实
+
+运动特征：**弹道式**——起跳快、落点稳，逼近速度 14*dt，比表情的 12*dt 更快，符合真人眼动特性。
+`turnTo()` 模式下眼睛先到、头随后跟上，这是真人转头的自然顺序。
+
+#### 7.4.3 眨眼
+- 眨眼：双眼同时闭合，下降速度 8/秒
+- 眨左眼 / 眨右眼：单眼 wink
+- 随机眨眼：1.8~4.3s 随机间隔
+
+注意：困倦表情会把眼皮压到 0.55，眨眼取 `max(lidBase, blinkValue)`，不会把表情的半闭眼给"顶没了"。
+
+#### 7.4.4 面部叠加动作
+在当前表情基准值之上叠加一层正弦包络（0 → peak → 0），结束后回落，不覆盖表情本身：
+
+- 挑眉 / 单挑眉 / 皱眉
+- 鼓腮 / 撅嘴 / 吐舌 / 咬唇 / 努嘴
+
+为什么不直接改表情？因为叠加动作是瞬时的（挑眉一下就回去了），表情是持续状态。
+两层分开就不会"挑个眉把微笑给抹掉了"。`exprBase` 存当前表情基准，叠加层在它之上加。
+
+### 7.5 分层架构（最核心的设计决策）
+
+四个系统同时生效，不能互相打架：
+
+```
+第 4 层  叠加动作（overlay）—— 挑眉/鼓腮/吐舌…（瞬时，正弦包络）
+第 3 层  持续表情（exprBase）—— 开心/悲伤/生气…（持续状态）
+第 2 层  眨眼（blink）—— 自然眨眼 + wink（每帧覆写 lid）
+第 1 层  注视（gaze）—— eyeLook* 8 个 + 眼球骨（持续跟随）
+第 0 层  口型（viseme）—— 15 个 viseme（跟随语音逐帧）
+```
+
+各层"拥有"不同的 blendshape 集合，互不越界：
+
+| 层 | 独占的 blendshape | 说明 |
+|---|---|---|
+| 注视 | 8 个 `eyeLook*` | 注视系统完全独占，表情绝对不碰 |
+| 眨眼 | 2 个 `eyeBlink*` | 眨眼每帧覆写，但取 max 保留表情的半闭眼 |
+| 表情 + 叠加 | 其余 42 个 ARKit | 表情是基准，叠加在上面增量加 |
+| 口型 | 15 个 `viseme_*` + `jawOpen` | 口型独立一套，和表情的 jawOpen 取 max |
+
+这是为什么 52 个 ARKit 可以全用上、而且不会打架的根本原因。
+
+### 7.6 口型同步
+
+- 标准：**Oculus viseme**，15 个
+- 驱动源：Edge WordBoundary 逐字时间轴（或 Web Speech `boundary` 事件兜底）
+- 映射：`viseme.js` 的 `visemeForChar(ch)` —— 中文按拼音韵母粗分，demo 级够用
+- 过渡：每字触发目标 viseme，130ms 后回落到闭口（`viseme_sil`）
+- `jawOpen` 跟随张口类 viseme，幅度 0.5
+
+注意：不是真音素级精度。中文没有拼音库，纯按字符映射 + 哈希兜底。
+优点是零依赖，缺点是一些字的口型可能不准（如 `zh/ch/sh` 都是 `viseme_CH`）。
+demo 级够用，要更准得上音素引擎（如 Piper）。
+
+### 7.7 自发微动（"活着"感来源）
+
+没有任何指令时数字人也在动，这是去掉「雕像感」性价比最高的一件事。三件事：
+
+1. **随机扫视（saccade）**：1.2~3.8s 一次，幅度 ±0.35 水平 / ±0.22 垂直
+2. **头部微摆**：两个正弦叠加（0.42 Hz + 0.97 Hz），幅度约 0.012 rad
+3. **呼吸起伏**：`Spine1` 绕 X 轴微摆，约 15 次/分，幅度 0.01 rad
+
+幅度都很小——小到你不特意注意就察觉不到，但没有的话立刻就"假"了。
+这是感知心理学里的著名效应：生物运动的微小不规则性，人脑对这个极其敏感。
+
+### 7.8 倾听姿态（被打断时的自然收尾）
+
+用户打断时数字人不是立刻僵住，而是：
+
+1. 收嘴（`mouthClosed()`）
+2. 眉根微抬 + 双眼微睁大（专注表情）
+3. 头部轻微侧倾（7°）
+4. 1.5 秒内如果没新内容，自动恢复到当前表情
+
+配合 TTS 的 `softStop()` 渐弱，整体效果是「话到嘴边收住，歪头听你说」——
+而不是「咔一下闭嘴不动」。
+
+### 7.9 兼容性与换模型规则
+
+换模型只需改 `main.js` 里 `'./src/avatar.glb'` 这一处路径。代码本身零改动。
+
+降级策略（容错链）：
+
+- 没有某个 blendshape → `apply()` 里 `if (!arr) return`，静默跳过，不崩
+- 没有某根骨骼 → `setBoneRot()` 里 `if (!bone) return`，对应功能自动失效
+- viseme 不齐 → 口型只会动有的那几个，不会出错
+- 甚至没有任何 morph → 就是个摆件，但渲染正常
+
+**三处必须同步**（加新表情/动作时）：
 
 | 文件 | 位置 | 作用 |
 |---|---|---|
 | `frontend/src/head3d.js` | `EXPR` / `OVERLAYS` | blendshape 组合定义 |
-| `frontend/src/main.js` | `EMOTION_SET` / `ACTION_MAP` | 白名单与分发（不在名单内降级为「平静」） |
-| `backend/config.py` | `SYSTEM_PROMPT` | 告知 LLM 有哪些标记可用 |
+| `frontend/src/main.js` | `EMOTION_SET` / `ACTION_MAP` | 白名单 + 分发（不在名单内降级为「平静」） |
+| `backend/config.py` | `SYSTEM_PROMPT` | 告诉 LLM 有哪些标记可用 |
 
-`index.html` 的 `#exprTest` 面板会自动列出全部表情与动作按钮，改完可直接点按钮肉眼验证，无需让模型配合。
+CI 脚本 `scripts/check_expressions.py` 会自动校验三处一致，防止漏改。
+
+### 7.10 未来扩展方向
+
+- **VRM 支持**：日式二次元模型，需要做 VRM ↔ ARKit 名称映射 + 口型 5 个 → 15 个的插值
+- **预制动画**：走路/挥手/跳舞等，当前模型有 18 个动画但未使用
+- **更精确的口型**：接入 Piper / 音素引擎，从"字符级"升到"音素级"
+- **摄像头跟随**：第 19 章规划中，数字人转头盯着走近的人
+- **换装 / 换发型**：RPM 支持配件切换，但需要后端 API
 
 ## 8. 验收标准（Demo 级）
 
