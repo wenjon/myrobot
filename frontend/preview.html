@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>头像素材预览 · 小柚</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0b0e17; color: #dfe6f5;
+         font: 14px/1.6 system-ui, "Microsoft YaHei", sans-serif; }
+  header { padding: 14px 18px; border-bottom: 1px solid #1e2740; }
+  h1 { margin: 0; font-size: 17px; }
+  .hint { color: #8a97b5; font-size: 12px; margin-top: 4px; }
+  .wrap { display: flex; gap: 16px; padding: 16px; align-items: flex-start; flex-wrap: wrap; }
+  .left { flex: 0 0 420px; max-width: 100%; }
+  .right { flex: 1; min-width: 300px; }
+  canvas { width: 420px; height: 460px; max-width: 100%; background: #0f1220;
+           border-radius: 10px; display: block; }
+  .card { background: #131829; border: 1px solid #1e2740; border-radius: 10px;
+          padding: 12px 14px; margin-bottom: 12px; }
+  .card h2 { margin: 0 0 10px; font-size: 14px; color: #9fb0d6; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 6px 8px; text-align: left; border-bottom: 1px solid #1c2438; }
+  th { color: #8a97b5; font-weight: 500; font-size: 12px; }
+  tr.pick { cursor: pointer; }
+  tr.pick:hover { background: #1a2136; }
+  tr.active { background: #1e2b4a; }
+  .ok { color: #6fcf97; }
+  .bad { color: #eb5757; }
+  .warn { color: #f2c94c; }
+  .badge { display: inline-block; padding: 1px 7px; border-radius: 20px;
+           font-size: 11px; background: #253048; color: #9fb0d6; }
+  button { background: #253048; color: #dfe6f5; border: 1px solid #35405c;
+           border-radius: 6px; padding: 5px 11px; font-size: 12px; cursor: pointer; }
+  button:hover { background: #2f3c5c; }
+  button.on { background: #2d5bd7; border-color: #4d78e8; }
+  .row { display: flex; flex-wrap: wrap; gap: 6px; }
+  code { background: #1a2136; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  #status { font-size: 12px; color: #8a97b5; margin-top: 8px; min-height: 18px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>头像素材预览</h1>
+  <div class="hint">
+    点表格里的任一行即可加载预览；下方按钮可试驱表情与口型，效果与正式页面完全一致。
+    满意后把该文件放进 <code>frontend/src/</code> 并改 <code>main.js</code> 里的模型路径即可。
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="left">
+    <canvas id="face" width="420" height="460"></canvas>
+    <div id="status">初始化中…</div>
+  </div>
+
+  <div class="right">
+    <div class="card">
+      <h2>候选素材</h2>
+      <table id="list"><thead>
+        <tr><th>模型</th><th>口型</th><th>表情</th><th>骨骼</th><th>面数</th><th>体积</th></tr>
+      </thead><tbody></tbody></table>
+      <div class="hint" style="margin-top:8px">
+        「口型」必须 15/15，否则说话时嘴不会动 —— 这是第一道硬门槛。
+        「表情」是 ARKit blendshape 数量，52 个才能支撑全部 18 种表情。
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>表情试驱</h2>
+      <div class="row" id="exprBtns"></div>
+    </div>
+
+    <div class="card">
+      <h2>动作试驱</h2>
+      <div class="row" id="actBtns"></div>
+    </div>
+
+    <div class="card">
+      <h2>口型试驱</h2>
+      <div class="row">
+        <button id="sayBtn">念一句话看口型</button>
+        <button id="visemeBtn">逐个过 15 个 viseme</button>
+      </div>
+      <div class="hint" style="margin-top:8px">
+        「念一句话」用的是真实 TTS 时间轴驱动，与正式对话完全同一条链路。
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import { createHead3D } from './src/head3d.js';
+import { speak, cancel } from './src/tts.js';
+import { visemeForChar } from './src/viseme.js';
+
+const canvas = document.getElementById('face');
+const statusEl = document.getElementById('status');
+const tbody = document.querySelector('#list tbody');
+let head = null;
+let loading = false;
+
+function setStatus(text, cls = '') {
+  statusEl.textContent = text;
+  statusEl.className = cls;
+}
+
+// 切换模型：每次都重建 head3d 实例。
+// 旧实例的渲染循环会因 canvas 被新实例接管而失效，demo 场景下可接受。
+async function load(url, name) {
+  if (loading) return;
+  loading = true;
+  cancel();
+  setStatus(`加载 ${name} …`);
+  try {
+    head = await createHead3D(canvas, url);
+    setStatus(`已加载 ${name}`, 'ok');
+    buildButtons();
+  } catch (e) {
+    setStatus(`加载失败：${e.message || e}`, 'bad');
+  } finally {
+    loading = false;
+  }
+}
+
+// ---- 素材列表 ----
+const res = await fetch('/api/avatars').then(r => r.json()).catch(() => null);
+if (!res || !res.ok || !res.avatars.length) {
+  setStatus('没有找到任何 glb 素材', 'bad');
+} else {
+  for (const a of res.avatars) {
+    const tr = document.createElement('tr');
+    tr.className = 'pick';
+    const vis = a.error ? '—'
+      : `<span class="${a.viseme_ok === 15 ? 'ok' : 'bad'}">${a.viseme_ok}/15</span>`;
+    const ark = a.error ? '—'
+      : `<span class="${a.arkit_count >= 52 ? 'ok' : 'warn'}">${a.arkit_count}</span>`;
+    const bone = a.error ? '—'
+      : (a.bones_missing.length
+          ? `<span class="warn" title="缺 ${a.bones_missing.join(',')}">缺${a.bones_missing.length}项</span>`
+          : '<span class="ok">齐备</span>');
+    tr.innerHTML = `
+      <td><span class="badge">${a.group}</span> ${a.name}
+          ${a.animations ? `<span class="hint">· ${a.animations} 动画</span>` : ''}</td>
+      <td>${vis}</td><td>${ark}</td><td>${bone}</td>
+      <td>${a.error ? '—' : (a.triangles / 1000).toFixed(1) + 'k'}</td>
+      <td>${a.error ? '<span class="bad">解析失败</span>' : a.size_mb + 'M'}</td>`;
+    tr.onclick = () => {
+      document.querySelectorAll('#list tbody tr').forEach(x => x.classList.remove('active'));
+      tr.classList.add('active');
+      load(a.url, a.name);
+    };
+    tbody.appendChild(tr);
+  }
+  // 默认加载第一个可用的
+  const first = res.avatars.find(a => a.usable) || res.avatars[0];
+  const rows = [...tbody.children];
+  const idx = res.avatars.indexOf(first);
+  if (rows[idx]) rows[idx].classList.add('active');
+  await load(first.url, first.name);
+}
+
+// ---- 试驱按钮 ----
+const ACTIONS = {
+  '点头': h => h.triggerNod(), '摇头': h => h.triggerShake(), '歪头': h => h.triggerTilt(1),
+  '看左': h => h.turnTo(-0.9), '看右': h => h.turnTo(0.9),
+  '看上': h => h.lookUp(), '看下': h => h.lookDown(),
+  '环视': h => h.lookAround(), '对视': h => h.resetPose(),
+  '眨眼': h => h.triggerBlink('both'),
+  '眨左眼': h => h.triggerBlink('left'), '眨右眼': h => h.triggerBlink('right'),
+  '挑眉': h => h.triggerOverlay('挑眉'), '单挑眉': h => h.triggerOverlay('单挑眉'),
+  '皱眉': h => h.triggerOverlay('皱眉'), '鼓腮': h => h.triggerOverlay('鼓腮'),
+  '撅嘴': h => h.triggerOverlay('撅嘴'), '吐舌': h => h.triggerOverlay('吐舌'),
+  '咬唇': h => h.triggerOverlay('咬唇'), '努嘴': h => h.triggerOverlay('努嘴'),
+};
+
+function buildButtons() {
+  const eb = document.getElementById('exprBtns');
+  const ab = document.getElementById('actBtns');
+  eb.innerHTML = ''; ab.innerHTML = '';
+  for (const name of head.expressionNames()) {
+    const b = document.createElement('button');
+    b.textContent = name;
+    b.onclick = () => {
+      eb.querySelectorAll('button').forEach(x => x.classList.remove('on'));
+      b.classList.add('on');
+      head.setExpression(name);
+    };
+    eb.appendChild(b);
+  }
+  for (const [name, fn] of Object.entries(ACTIONS)) {
+    const b = document.createElement('button');
+    b.textContent = name;
+    b.onclick = () => fn(head);
+    ab.appendChild(b);
+  }
+}
+
+// 口型：走真实 TTS 链路，和正式对话完全一致
+let mouthTimer = null;
+document.getElementById('sayBtn').onclick = () => {
+  const text = '你好呀，我是小柚！今天想聊点什么呢？';
+  cancel();
+  setStatus('合成语音中…');
+  speak(text, 0, (b) => {
+    if (!head) return;
+    if (b.char === '') { head.mouthClosed(); setStatus('播放完毕', 'ok'); return; }
+    head.setViseme(visemeForChar(b.char), 1.0);
+    clearTimeout(mouthTimer);
+    mouthTimer = setTimeout(() => head.mouthClosed(), 130);
+  }, () => {});
+};
+
+// 逐个过 viseme：用于确认每个口型形状是否正常
+document.getElementById('visemeBtn').onclick = async () => {
+  const list = ['viseme_sil','viseme_PP','viseme_FF','viseme_TH','viseme_DD','viseme_kk',
+    'viseme_CH','viseme_SS','viseme_nn','viseme_RR','viseme_aa','viseme_E','viseme_I',
+    'viseme_O','viseme_U'];
+  for (const v of list) {
+    if (!head) return;
+    head.setViseme(v, 1.0);
+    setStatus('口型: ' + v);
+    await new Promise(r => setTimeout(r, 420));
+  }
+  head.mouthClosed();
+  setStatus('15 个口型已全部过完', 'ok');
+};
+</script>
+</body>
+</html>

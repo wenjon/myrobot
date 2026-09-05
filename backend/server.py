@@ -384,6 +384,105 @@ async def no_cache_static(request, call_next):
     return response
 
 
+# =====================================================================
+# 头像素材预览（挑选 3D 模型用）
+# =====================================================================
+# 为什么需要：换脸型要先确认候选 glb 的 blendshape / 骨骼是否满足驱动要求
+# （viseme 不齐口型就不会动）。这个接口列出 avatar_candidates/ 下的模型及其
+# 匹配情况，配合 /app/preview.html 可直接肉眼对比、试驱表情口型。
+AVATAR_DIR = Path(__file__).resolve().parent.parent / "avatar_candidates"
+
+# 驱动所需的 15 个 Oculus viseme（缺失则口型无法工作）
+_REQUIRED_VISEMES = [
+    "viseme_sil", "viseme_PP", "viseme_FF", "viseme_TH", "viseme_DD",
+    "viseme_kk", "viseme_CH", "viseme_SS", "viseme_nn", "viseme_RR",
+    "viseme_aa", "viseme_E", "viseme_I", "viseme_O", "viseme_U",
+]
+_REQUIRED_BONES = ["Head", "Neck", "LeftEye", "RightEye", "Spine1"]
+
+
+def _inspect_glb(path: Path) -> dict:
+    """解析 glb 的 JSON chunk，取出 blendshape / 骨骼 / 面数等信息。
+
+    只读文件头部的 JSON chunk，不解析二进制网格数据，因此很快。
+    """
+    import struct
+
+    data = path.read_bytes()
+    if len(data) < 20 or data[:4] != b"glTF":
+        raise ValueError("不是有效的 glb 文件")
+    json_len = struct.unpack_from("<I", data, 12)[0]
+    gltf = json.loads(data[20:20 + json_len].decode("utf-8"))
+
+    # blendshape 名（存在 mesh.extras.targetNames）
+    morphs: list[str] = []
+    for mesh in gltf.get("meshes", []):
+        for name in (mesh.get("extras") or {}).get("targetNames", []):
+            if name not in morphs:
+                morphs.append(name)
+
+    # 骨骼名：取所有 skin 引用到的 node
+    nodes = gltf.get("nodes", [])
+    joint_ids: set = set()
+    for skin in gltf.get("skins", []):
+        joint_ids.update(skin.get("joints", []))
+    bones = {nodes[i].get("name", "") for i in joint_ids if i < len(nodes)}
+
+    # 面数（按 indices 数量估算）
+    accessors = gltf.get("accessors", [])
+    triangles = 0
+    for mesh in gltf.get("meshes", []):
+        for prim in mesh.get("primitives", []):
+            idx = prim.get("indices")
+            if idx is not None and idx < len(accessors):
+                triangles += accessors[idx]["count"] // 3
+
+    visemes = [v for v in _REQUIRED_VISEMES if v in morphs]
+    arkit = [m for m in morphs if not m.startswith("viseme")]
+    return {
+        "size_mb": round(len(data) / 1024 / 1024, 2),
+        "triangles": triangles,
+        "animations": len(gltf.get("animations", [])),
+        "morph_total": len(morphs),
+        "viseme_ok": len(visemes),
+        "viseme_missing": [v for v in _REQUIRED_VISEMES if v not in morphs],
+        "arkit_count": len(arkit),
+        "bones": len(bones),
+        "bones_missing": [b for b in _REQUIRED_BONES if b not in bones],
+        # 能否驱动口型：15 个 viseme 是硬门槛
+        "usable": len(visemes) == len(_REQUIRED_VISEMES),
+    }
+
+
+@app.get("/api/avatars")
+async def list_avatars():
+    """列出可预览的头像素材及其驱动兼容性。
+
+    扫描两处：frontend/src/*.glb（当前在用的）与 avatar_candidates/*.glb（候选）。
+    """
+    items = []
+    sources = [
+        (FRONTEND_DIR / "src", "/app/src/", "当前"),
+        (AVATAR_DIR, "/avatars/", "候选"),
+    ]
+    for directory, url_prefix, group in sources:
+        if not directory.exists():
+            continue
+        for glb in sorted(directory.glob("*.glb")):
+            entry = {"name": glb.name, "url": url_prefix + glb.name, "group": group}
+            try:
+                entry.update(_inspect_glb(glb))
+            except Exception as exc:                       # noqa: BLE001
+                entry["error"] = f"{type(exc).__name__}: {exc}"
+                entry["usable"] = False
+            items.append(entry)
+    return {"ok": True, "avatars": items, "dir": str(AVATAR_DIR)}
+
+
+# 候选素材目录（可能不存在，不存在就不挂载）
+if AVATAR_DIR.exists():
+    app.mount("/avatars", StaticFiles(directory=str(AVATAR_DIR)), name="avatars")
+
 # 挂载前端静态资源（放在路由定义之后，避免覆盖 API 路由）
 if FRONTEND_DIR.exists():
     app.mount("/app", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="app")
