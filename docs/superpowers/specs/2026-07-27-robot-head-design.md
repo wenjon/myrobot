@@ -105,7 +105,7 @@ Qwen3 系列默认会先输出一大段**深度思考**（`reasoning_content`）
 - `server.py` — FastAPI 装配 + HTTP 路由 + `/ws` 端点（队列与 worker）。单轮对话主循环已迁出到 `server_app/dialog.py`。
 - `server_app/` — 从 server.py 拆出的辅助模块（职责单一）：
   - `__init__.py`，包描述
-  - `logging.py` — 控制台 + 可选文件日志器（`ContextLogger`）、`log_context` / `log_output`。
+  - `logging.py` — 控制台 + 可选文件日志器（`ContextLogger`）、`log_context` / `log_output`；含 GBK 控制台编码兜底。详见第 21 章。
   - `peers.py` — WS 客户端地址格式化（`format_peer`，IPv4/IPv6/转发头）。
   - `dialog.py` — 单轮对话主循环（`run_dialog`：LLM → 中央调度 → WS 推送 → commit/rollback）。
   - `notify.py` — 服务端主动下发辅助消息（如 `interrupted`）。
@@ -368,7 +368,54 @@ demo 级够用，要更准得上音素引擎（如 Piper）。
 
 CI 脚本 `scripts/check_expressions.py` 会自动校验三处一致，防止漏改。
 
-### 7.10 未来扩展方向
+### 7.10 模型挑选与预览页
+
+#### 7.10.1 挑选流程
+
+换模型的三步法：
+
+1. **候选筛选** — 把候选 `.glb` 文件放进 `avatar_candidates/`（不入库）
+2. **兼容性检测** — `python scripts/probe_avatar.py 模型.glb` 看 viseme/ARKit/骨骼是否满足要求
+3. **肉眼验证** — 打开 `/app/preview.html`，点击列表加载模型，逐一试驱表情/动作/口型
+
+为什么不能直接换：即使 viseme 数量一样，不同模型的口型形状、表情强度可能差异很大，必须肉眼确认效果。
+
+#### 7.10.2 预览页功能（/app/preview.html）
+
+独立页面，与正式对话页共用 `head3d.js`，所见即最终效果：
+
+| 功能 | 说明 |
+|---|---|
+| 模型列表 | 自动扫描 `frontend/src/`（当前在用）和 `avatar_candidates/`（候选） |
+| 兼容性标记 | 每行列出口型 15/15、ARKit 数量、骨骼齐备度、面数、体积 |
+| 表情试驱 | 18 种表情按钮，一键切换对比 |
+| 动作试驱 | 21 种动作按钮，点头/注视/眨眼/面部叠加 |
+| 口型试驱 1 — 真实 TTS | 用 Edge 合成一句话，与正式对话完全同一条链路 |
+| 口型试驱 2 — 逐 viseme | 15 个 viseme 逐个过，检查每个口型形状对不对 |
+| 音色切换 | 下拉框即时切换，验证不同音色下口型是否同步 |
+
+#### 7.10.3 兼容性等级
+
+根据探测结果，模型可分为四级：
+
+| 等级 | 条件 | 能做什么 |
+|---|---|---|
+| S 级 | viseme 15/15 + ARKit ≥ 50 + 骨骼全 + 面数 < 15K | 全部功能可用，推荐 |
+| A 级 | viseme 15/15 + ARKit ≥ 30 + Head/Neck 有 | 口型正常，部分表情可用，点头转头正常 |
+| B 级 | viseme ≥ 10 + Head 有 | 能说话能转头，表情少 |
+| C 级 | viseme 0 或骨骼全无 | 摆件，驱动不了 |
+
+当前 `avatar.glb` 是 S 级。
+
+#### 7.10.4 正式替换步骤
+
+1. 将选定的 `.glb` 文件复制到 `frontend/src/`
+2. 修改 `frontend/src/main.js` 里 `'./src/avatar.glb'` 为新文件名
+3. 如果表情/骨骼有差异，相应调整 `EXPR` 表 / 骨骼引用
+4. 在预览页验证全部功能正常
+5. 正式对话页跑一轮完整对话确认
+
+### 7.11 未来扩展方向
 
 - **VRM 支持**：日式二次元模型，需要做 VRM ↔ ARKit 名称映射 + 口型 5 个 → 15 个的插值
 - **预制动画**：走路/挥手/跳舞等，当前模型有 18 个动画但未使用
@@ -408,6 +455,8 @@ CI 脚本 `scripts/check_expressions.py` 会自动校验三处一致，防止漏
 - `python scripts/check_memory.py` 全部断言通过（已接入 CI）。
 
 ### 8.5 工程质量
+- 上下文日志能完整回答「模型这轮收到了什么」：条数/字符数/逐条内容/摘要/画像/待确认冲突（第 21 章）。
+- 日志遇到不可编码字符（emoji / U+200E）时降级打印，**对话不中断**，文件仍为完整 utf-8。
 - `python -m compileall backend/` 无语法错；`scripts/check_no_hardcoded_secrets.py` 返回 0。
 - 代码中**无硬编码密钥**，密钥均从 `.env` 读取（第 14 章）。
 - GitHub Actions 三个 job 全绿（第 15 章）。
@@ -426,6 +475,9 @@ CI 脚本 `scripts/check_expressions.py` 会自动校验三处一致，防止漏
 - 加入伺服时序补偿模块（当前为接口占位，无物理硬件）。
 - 全局时钟对齐、智能降级策略。
 - 双模型路由（简单问题走快模型 / 复杂推理走强模型），待设计。
+- RAG 知识库（PDF/XLSX ingest + 向量检索工具），**设计已完成**见第 20 章与 `docs/rag-design.md`，代码未实现。
+- 摄像头感知与注视跟随，**设计已完成**见第 19 章，等硬件接口调通后实现。
+- 上下文瘦身（system prompt / tools schema 精简、摘要压缩策略），量化依据见第 22 章与 `docs/token-cost.md`。
 
 
 ## 10. 工具调用框架（tools / function calling）
@@ -1387,31 +1439,54 @@ comm = edge_tts.Communicate(text, voice, boundary="WordBoundary", rate=..., pitc
 所以 `tts_edge.py` 把词时长**按字均分展开成逐字 mark**，并用 `text.find(word, cursor)`
 把 mark 映射回原文字符下标（`cursor` 单向前进，避免同一个字反复命中开头那次）。
 
-### 18.5 配置与音色挑选
+### 18.5 音色体系与挑选指南
+
+#### 18.5.1 配置项
+
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `TTS_ENGINE` | `edge` | `edge` 神经语音 / `web` 浏览器 Web Speech |
 | `TTS_VOICE` | `zh-CN-XiaoyiNeural` | 音色，共 14 个中文可选 |
 | `TTS_RATE` | `+8%` | 语速，相对量百分比 |
-| `TTS_PITCH` | `+10Hz` | 音高，单位 Hz |
+| `TTS_PITCH` | `+10Hz` | 音高，单位 Hz（仅支持 Hz 语法，%/st/high 等 Edge 免费端点不支持） |
 | `TTS_VOLUME` | `+0%` | 音量 |
 | `TTS_PROSODY` | `broadcast` | 韵律风格：`broadcast` 播音腔 / `natural` 日常口语 / `flat` 关闭 |
 
-推荐音色：
+#### 18.5.2 中文音色矩阵（14 个）
 
-| 音色 | 特点 | 适用 |
-|---|---|---|
-| `zh-CN-XiaoyiNeural` | 活泼少女，Cartoon/Novel·Lively | **当前默认**，最贴合「小柚」人设 |
-| `zh-CN-XiaoxiaoNeural` | 温暖女声，News/Novel·Warm | 最稳最百搭 |
-| `zh-CN-YunxiaNeural` | 男童声·Cute | 想换可爱男声 |
-| `zh-CN-YunxiNeural` | 少年男声·阳光 | 男性人设 |
-| `zh-CN-liaoning-XiaobeiNeural` | 东北方言·幽默 | 整活 |
+Edge 免费端点支持的所有中文音色按类型分组：
 
-挑选方式二选一：
+| 类型 | 音色 | 标签 | 适用场景 |
+|---|---|---|---|
+| 女声（通用） | `zh-CN-XiaoxiaoNeural` | News / Novel · Warm | 温暖女声，最百搭 |
+| 女声（卡通） | `zh-CN-XiaoyiNeural` | Cartoon / Novel · Lively | **默认**，活泼少女，贴合小柚人设 |
+| 男声（少年） | `zh-CN-YunxiNeural` | Novel · Lively / Sunshine | 年轻男声 |
+| 男声（新闻） | `zh-CN-YunyangNeural` | News · Professional | 沉稳播音腔 |
+| 男声（体育） | `zh-CN-YunjianNeural` | Sports / Novel · Passion | 激情活力 |
+| 童声（男） | `zh-CN-YunxiaNeural` | Cartoon / Novel · Cute | 可爱小男孩 |
+| 方言（东北） | `zh-CN-liaoning-XiaobeiNeural` | Dialect · Humorous | 整活、喜剧效果 |
+| 方言（陕西） | `zh-CN-shaanxi-XiaoniNeural` | Dialect · Bright | 地域特色 |
+| 粤语 | `zh-HK-HiuGaaiNeural` / `zh-HK-HiuMaanNeural` / `zh-HK-WanLungNeural` | General · Friendly / Positive | 粤语环境 |
+| 台湾国语 | `zh-TW-HsiaoChenNeural` / `zh-TW-HsiaoYuNeural` / `zh-TW-YunJheNeural` | General · Friendly / Positive | 台湾腔 |
 
-- 跑 `python scripts/tts_preview.py` 生成 9 个样本到 `voice_preview/`（含 `README.txt` 对应参数），
-  听完把参数写进 `.env` 重启后端。
-- 直接在页面 `#exprTest` 面板的下拉框里现场切换（仅影响当前页面，不改后端默认值）。
+完整列表：`edge-tts --list-voices` 或跑 `scripts/tts_preview.py` 生成试听。
+
+#### 18.5.3 挑选流程（推荐按这个顺序）
+
+1. **先选音色类型**：少女 / 通用女声 / 男声 / 童声 / 方言
+2. **生成试听样本**：`python scripts/tts_preview.py` → `voice_preview/`
+3. **对比 A/B 韵律**：每个音色都有 `_A_flat`（无韵律）和 `_B_broadcast`（播音腔）两个版本，确认韵律风格是否适合
+4. **调参微调**：`TTS_RATE`（±5% 一步）/ `TTS_PITCH`（±10Hz 一步）
+5. **写入 `.env` 重启后端**
+6. **正式对话确认**：在 `/app/index.html` 真实对话中验证，因为上下文、情绪、语速都会影响听感
+
+#### 18.5.4 页面级快速切换（不重启）
+
+正式页 `/app/index.html` 和预览页 `/app/preview.html` 的 `#exprTest` 面板都有两个下拉框：
+- **音色**：即时切换，只影响当前浏览器
+- **韵律**：broadcast / natural / flat 三档切换
+
+适合快速对比，最终确定后再写进 `.env` 作为默认值。
 
 `voice_preview/` 与 `*.mp3` 已在 `.gitignore` 中，音频不入库。
 
@@ -1579,3 +1654,138 @@ Edge 返回的是 **MPEG-2 Layer III / 24kHz / 48kbps / 单声道**裸流
 3. 鼠标模拟：鼠标在画布上移动模拟人位置，验证效果
 4. 后端：订阅器 + 广播通道
 5. 视觉进程：接入真实摄像头
+
+
+## 20. RAG 知识库接入（P2，设计阶段）
+
+> 完整设计（样本分析、选型对比、切块参数、目录产物、验证清单、风险）在独立文档 `docs/rag-design.md`。
+> 本章只保留**与本规格其它章节的接口关系**，避免两份文档互相漂移。
+
+### 20.1 为什么单独一章
+
+RAG 不是一个新链路，而是**挂在已有工具框架上的一个工具**。它需要和三处对齐：
+第 10 章（工具注册与权限）、第 13 章（配置项）、第 22 章（token 成本）。
+
+### 20.2 接入点（最小侵入原则）
+
+| 接入点 | 做法 | 为什么这样 |
+|---|---|---|
+| 工具层 | 新增 `tools/knowledge/kb_search.py`，`@tool(category=KNOWLEDGE, permission=READ)` | 复用现成的注册/权限/超时/日志，编排代码零改动 |
+| 资源层 | 向量索引与 embedding 客户端放 `tools/context.py` 的 `RESOURCES` 懒加载 | 索引加载慢（十几 MB），不能每次调用都读盘 |
+| Prompt | system prompt 只加一句「有本地知识库，涉及已入库资料时用 kb_search」 | 加多了就是每轮永久开销，见第 22 章 |
+| 前端 | 复用现有 `tool_status` 消息显示「正在检索知识库…」 | 不需要新消息类型 |
+
+### 20.3 关键设计决定（摘要）
+
+- **切块按文档类型分路径**：书按语义段落（重叠滑窗），报告按页 + 图表标题，表格按行组装成自然语言句子再入库。一套参数吃所有格式必然有一类效果很差。
+- **不上重型向量数据库**：本机集显/AMD，选轻量本地索引 + 本地 embedding，文档不出网。
+- **检索必须带出处**：返回结果携带来源文件 + 页码/行号，让模型能说"这出自哪"，也方便人工核查是否胡编。
+- **负样本要验**：「深圳今天天气」不能触发 `kb_search`，「你好」不能触发任何工具 —— 否则每次闲聊都白付检索延迟。
+
+### 20.4 与记忆模块的边界（容易混）
+
+| | 记忆（第 16 章） | 知识库（本章） |
+|---|---|---|
+| 内容来源 | 对话中自然产生 | 人工投喂的外部文档 |
+| 写入方式 | 自动提炼 + 冲突确认 | 离线 ingest 脚本 |
+| 读取方式 | 每轮全量拼进 prompt | 按需检索（工具调用） |
+| 生命周期 | 跟用户/会话绑定 | 与用户无关，全局共享 |
+
+两者独立，不要合并成一个"记忆系统"。
+
+
+## 21. 可观测性：上下文日志与输出日志
+
+### 21.1 为什么调试能力算设计的一部分
+
+这条链路是「流式 + 异步 + 多层记忆拼接 + 工具两阶段」，出问题时最常见的疑问是：
+**「模型到底收到了什么？」**。没有这个答案，记忆没生效 / 画像没拼上 / 摘要注错位置这类 bug 只能靠猜。
+所以日志不是事后补的，而是和记忆模块同期设计的。
+
+### 21.2 实现（`backend/server_app/logging.py`）
+
+进程内单例 `ContextLogger`，双通道输出：
+
+| 通道 | 内容 | 开关 |
+|---|---|---|
+| 控制台 | 实时看，可能有损（编码兜底） | `LOG_CONTEXT` |
+| 文件 | 全量 utf-8，append | `CONTEXT_LOG_FILE`（空串则不写文件） |
+
+生命周期挂在 FastAPI lifespan 上（第 12 章）：启动 `init()` 建目录开文件，关闭 `close()` 刷盘。
+
+### 21.3 两个日志点
+
+- `log_context(session, messages, user_text, who)` —— 在**调 LLM 之前**打印这一轮真正发出去的 messages：
+  - 头部：时间戳 / 来源 / 会话短 id / 用户原句
+  - 统计：`N msgs, M chars`（这就是第 22 章 token 估算的数据来源）
+  - 逐条：`序号. [SYS|U|BOT] 内容`，单条超 200 字截断并标 `...(+Nch)`
+  - 额外三行：`[summary]` 长期摘要 / `[profile]` 用户画像 / `[profile-pending]` 待确认冲突数
+- `log_output(session, assistant_raw, note, who)` —— 打印模型**原始**输出（清洗与动作抽取**之前**），这样才能看出动作标记是模型没生成还是被前端吃了。
+
+为什么画像要单独再打一行：它已经拼在 SYS 里了，但 SYS 常常超过 200 字被截断，
+截断后就正好看不见画像 —— 而"机器人到底记住了我什么"恰恰是最需要确认的。
+
+### 21.4 坑：Windows GBK 控制台把整轮对话打挂了
+
+现象：接入联网搜索后，某些问题必崩，且崩在**打印**而不是业务逻辑。
+
+原因：Windows 默认 `sys.stdout.encoding` 是 GBK（cp936）；Tavily 返回的网页文本里带
+U+200E（LRM 方向标记）、emoji 等 GBK 编不出的字符，`print` 直接抛 `UnicodeEncodeError`，
+异常向上冒泡把整轮 dialog 干掉了。
+
+修复（`emit()` 里）：
+```python
+try:
+    print(line, flush=True)
+except UnicodeEncodeError:
+    enc = getattr(sys.stdout, 'encoding', None) or 'utf-8'
+    print(line.encode(enc, errors='replace').decode(enc, errors='replace'), flush=True)
+```
+原则：**日志是观测手段，永远不能成为故障源**。控制台可以有损（显示成 `?`），
+文件仍写完整 utf-8，所以事后排查不丢信息。
+
+同类约束（开发环境注意）：PowerShell 控制台是 GBK，中文文档内容显示乱码属正常，
+校验文件内容要用 `Get-Content -Encoding utf8`，不能以控制台显示为准。
+
+### 21.5 相关配置
+
+见第 13.8 节（`LOG_CONTEXT` / `CONTEXT_LOG_FILE`）。
+
+
+## 22. 上下文 token 成本（量化摸底）
+
+> 完整拆解（逐项字符数/tokens、两阶段请求实测、优化候选清单）在 `docs/token-cost.md`。
+
+### 22.1 起因
+
+主观感受是"上下文看着很冗余，JSON 格式是不是很占字数"。
+先量化再动手，避免凭感觉乱剪把功能剪坏 —— **本次只出数据与结论，不改代码**。
+
+### 22.2 结论一：JSON 外层不是问题
+
+OpenAI 兼容协议的最外层 envelope（`model` / `stream` / `temperature` / `tool_choice` …）
+在我们的请求里只有约 50 字符（~12 tokens），可以忽略。贵的是 envelope **装的东西**。
+
+### 22.3 结论二：分清永久开销与临时开销
+
+| 类别 | 项目 | 约 tokens | 特点 |
+|---|---|---|---|
+| 永久 | `SYSTEM_PROMPT` | ~84 | 每轮重发 |
+| 永久 | tools schemas（2 个工具） | ~148 | 每轮重发，**仅探测轮** |
+| 永久 | JSON envelope | ~12 | 可忽略 |
+| 临时 | 历史消息 | 受 `MAX_TURNS` / `MAX_CONTEXT_CHARS` 约束 | 超限裁剪 + 摘要 |
+| 临时 | 工具结果回喂 | 视搜索结果长度，最大项 | 用完即丢 |
+
+永久开销小计 ~245 tokens/轮。`ENABLE_TOOLS=0` 时可省掉其中 148。
+
+### 22.4 结论三：真正的大头是工具结果
+
+联网搜索的返回文本远超 prompt 本身，且它走的是**两阶段两次请求**（第 10.3 节），
+所以工具轮的成本结构和普通轮完全不同。要省 token，优先动搜索结果的条数与摘要长度
+（`web_search` 检索参数见第 10.6 节），而不是去剪 system prompt。
+
+### 22.5 与其它章节的关系
+
+- 上下文裁剪与摘要机制：第 16 章
+- 工具 schema 体积：第 10 章（description 越啰嗦越贵）
+- 配置阈值：第 13.6 / 13.7 节

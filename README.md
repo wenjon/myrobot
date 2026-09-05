@@ -153,21 +153,29 @@ python backend\server.py
 
 ## 设计文档
 
-完整设计规格（共 17 章）：`docs/superpowers/specs/2026-07-27-robot-head-design.md`
+- 需求文档（做什么、为什么、优先级）：`docs/superpowers/prd.md`
+- 设计规格（怎么实现，共 22 章）：`docs/superpowers/specs/2026-07-27-robot-head-design.md`
+- 专题文档：`docs/rag-design.md`（RAG 知识库设计）、`docs/token-cost.md`（上下文 token 成本拆解）
 
-常用章节速查：
+常用章节速查（设计规格）：
 
 | 想了解 | 看第几章 |
 |---|---|
 | 整体架构与数据流 | 3 |
 | WebSocket 消息完整定义 | 5 |
-| 口型/表情怎么驱动的 | 7 |
+| 口型/表情/动作/分层驱动 | 7 |
 | 工具调用（联网搜索等） | 10 |
 | 打断策略与自然收尾 | 11 |
 | 所有配置项含义 | 13 |
 | 密钥管理 | 14 |
+| CI 静态检查 | 15 |
 | 记忆分层 / 用户画像 / 持久化 | 16 |
 | 手机/外网访问与排障 | 17 |
+| TTS 音色与韵律（抑扬顿挫） | 18 |
+| 摄像头感知与注视跟随（设计中） | 19 |
+| RAG 知识库接入（设计中） | 20 |
+| 日志与可观测性 | 21 |
+| 上下文 token 成本 | 22 |
 
 ## 目录
 - `docs/superpowers/specs/` — 设计规格（superpowers 流程产出）
