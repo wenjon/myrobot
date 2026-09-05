@@ -64,6 +64,12 @@ TTS_VOICE = os.getenv("TTS_VOICE", "zh-CN-XiaoyiNeural")
 TTS_RATE = os.getenv("TTS_RATE", "+8%")
 TTS_PITCH = os.getenv("TTS_PITCH", "+10Hz")
 TTS_VOLUME = os.getenv("TTS_VOLUME", "+0%")
+# 韵律风格（抑扬顿挫）。Edge 免费端点不收 SSML，句内起伏靠"拆段+逐段参数+服务端拼接"实现。
+#   broadcast —— 播音/主播腔：起伏明显、句末降调收束、停顿层级清晰（默认）
+#   natural   —— 日常口语：起伏取一半强度，更接近原声
+#   flat      —— 关闭韵律，整句一次合成（最省时、最省流量）
+# 代价：一句拆 N 段就是 N 次合成请求，首句延迟略增，详见 docs 第 18.6。
+TTS_PROSODY = os.getenv("TTS_PROSODY", "broadcast")
 
 # 智能分句参数
 SENTENCE_MIN_LEN = int(os.getenv("SENTENCE_MIN_LEN", "8"))

@@ -26,7 +26,7 @@ from fastapi.responses import RedirectResponse
 from config import (
     HOST, PORT, LLM_PROVIDER, OLLAMA_MODEL, ARK_MODEL, LOG_CONTEXT, CONTEXT_LOG_FILE,
     SHOW_REAL_IP, INTERRUPT_MODE,
-    TTS_ENGINE, TTS_VOICE, TTS_RATE, TTS_PITCH, TTS_VOLUME,
+    TTS_ENGINE, TTS_VOICE, TTS_RATE, TTS_PITCH, TTS_VOLUME, TTS_PROSODY,
 )
 from pipeline.llm_client import stream_chat, chat_once
 from pipeline.text_router import route
@@ -130,7 +130,7 @@ async def health():
     model = ARK_MODEL if LLM_PROVIDER == "ark" else OLLAMA_MODEL
     return {
         "ok": True, "provider": LLM_PROVIDER, "model": model,
-        "tts": {"engine": TTS_ENGINE, "voice": TTS_VOICE,
+        "tts": {"engine": TTS_ENGINE, "voice": TTS_VOICE, "prosody": TTS_PROSODY,
                 "rate": TTS_RATE, "pitch": TTS_PITCH},
     }
 
@@ -144,7 +144,7 @@ async def health():
 @app.get("/api/tts/config")
 async def tts_config():
     """前端启动时拉一次，决定用 edge 还是降级到 Web Speech。"""
-    return {"engine": TTS_ENGINE, "voice": TTS_VOICE,
+    return {"engine": TTS_ENGINE, "voice": TTS_VOICE, "prosody": TTS_PROSODY,
             "rate": TTS_RATE, "pitch": TTS_PITCH, "volume": TTS_VOLUME}
 
 
@@ -171,6 +171,9 @@ async def tts(payload: dict = Body(...)):
             rate=payload.get("rate", ""),
             pitch=payload.get("pitch", ""),
             volume=payload.get("volume", ""),
+            # 情绪基调：前端把当前表情一起带上来，让声音跟着表情走（视听一致）
+            emotion=payload.get("emotion", ""),
+            style=payload.get("style", ""),
         )
         result["ok"] = True
         return result

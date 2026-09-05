@@ -1,6 +1,7 @@
 import { createHead3D } from './head3d.js';
 import { connect } from './ws.js';
-import { speak, cancel, softStop, ttsReady, currentEngine, currentVoice, setVoice } from './tts.js';
+import { speak, cancel, softStop, ttsReady, currentEngine, currentVoice, setVoice,
+         setEmotion, currentProsody, setProsody } from './tts.js';
 import { visemeForChar, CLOSED } from './viseme.js';
 import { createProfileCards } from './profile_card.js';
 
@@ -117,7 +118,7 @@ const ws = connect(WS_URL, {
     statusEl.textContent = '已连接';
     statusEl.className = 'ok';
     ws.send({ type: 'hello', session: sessionId });
-    ttsReady.then(() => console.log(`[TTS] 引擎=${currentEngine()} 音色=${currentVoice()}`));
+    ttsReady.then(() => console.log(`[TTS] 引擎=${currentEngine()} 音色=${currentVoice()} 韵律=${currentProsody()}`));
   },
   onClose: () => { statusEl.textContent = '断开，重连中…'; statusEl.className = 'bad'; },
   onMessage: (msg) => {
@@ -127,10 +128,13 @@ const ws = connect(WS_URL, {
       log('bot', msg.text);
       speak(msg.text, msg.seq, (b) => driveMouth(b.char), () => {});
     } else if (msg.type === 'action') {
+      // 表情先同步给 TTS：数字人可能还在加载（head 为 null），但声音不该因此丢掉情绪
+      if (msg.action === '表情' && EMOTION_SET.has(msg.value)) setEmotion(msg.value);
       if (!head) return;
       if (msg.action === '表情') {
         const e = EMOTION_SET.has(msg.value) ? msg.value : '平静';
         head.setExpression(e);
+        setEmotion(e);     // 同步给 TTS：声音的语速/音高也跟着情绪走
       } else if (msg.action === '动作') {
         dispatchAction(head, msg.value);
       }
@@ -207,6 +211,19 @@ function buildVoicePicker() {
     .catch(() => {});
   sel.onchange = () => setVoice(sel.value);
   exprTestEl.appendChild(sel);
+
+  // 韵律风格：broadcast 播音腔 / natural 日常口语 / flat 关闭
+  const ps = document.createElement('select');
+  ps.id = 'prosodySel';
+  ps.title = '韵律风格（抑扬顿挫强度）';
+  for (const [val, label] of [['broadcast', '播音腔'], ['natural', '日常口语'], ['flat', '无韵律']]) {
+    const o = document.createElement('option');
+    o.value = val; o.textContent = label;
+    if (val === currentProsody()) o.selected = true;
+    ps.appendChild(o);
+  }
+  ps.onchange = () => setProsody(ps.value);
+  exprTestEl.appendChild(ps);
 }
 
 sendBtn.onclick = sendMessage;

@@ -32,9 +32,17 @@ export const ttsReady = fetch('/api/tts/config')
 
 export function currentEngine() { return engine; }
 export function currentVoice() { return ttsConfig.voice || '(浏览器默认)'; }
-// 运行时切音色/引擎（调试面板用），不改后端默认值
+export function currentProsody() { return ttsConfig.prosody || 'broadcast'; }
+// 运行时切音色/引擎/韵律（调试面板用），不改后端默认值
 export function setVoice(voice) { ttsConfig = { ...ttsConfig, voice }; }
 export function setEngine(name) { engine = name === 'edge' ? 'edge' : 'web'; }
+export function setProsody(style) { ttsConfig = { ...ttsConfig, prosody: style }; }
+
+// 当前情绪基调：由 main.js 在收到 [表情:x] 时同步过来。
+// 传给后端后会叠加成语速/音高/音量偏置——开心偏快偏高、悲伤偏慢偏低，
+// 这样表情不只改脸，声音也跟着变，视听一致。
+let currentEmotion = '平静';
+export function setEmotion(name) { if (name) currentEmotion = name; }
 
 // 找中文语音（web 路径）
 function getVoice() {
@@ -62,10 +70,17 @@ export function speak(text, seq, onBoundary, onEnd) {
 }
 
 function fetchAudio(text) {
+  // 注意 emotion 取的是"入队时刻"的表情。服务端 action 消息先于 sentence 下发，
+  // 所以这一句拿到的正是它自己那段话对应的情绪，不会串到上一句。
   return fetch('/api/tts', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, voice: ttsConfig.voice || '' }),
+    body: JSON.stringify({
+      text,
+      voice: ttsConfig.voice || '',
+      emotion: currentEmotion,
+      style: ttsConfig.prosody || '',
+    }),
   })
     .then((r) => r.json())
     .catch(() => null);
