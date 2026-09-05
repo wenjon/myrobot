@@ -3,7 +3,57 @@
 基于《机器人头部交互式对话全链路技术方案（流式低延迟架构正式版）》的**纯软件模拟**实现。
 无需物理零件，用浏览器里的 **Three.js 3D 数字人**替代物理伺服头部，跑通全链路流式对话。
 
-链路：`文本/语音输入 → (ASR) → 记忆拼接(滑动窗口+摘要+用户画像) → LLM(Ark / llama.cpp / Ollama) → 文本解析中央调度(+工具调用) → TTS(Web Speech) → 3D viseme 口型/表情`
+链路：`文本/语音输入 → (ASR) → 记忆拼接(滑动窗口+摘要+用户画像) → LLM(Ark / llama.cpp / Ollama) → 文本解析中央调度(+工具调用) → TTS(Edge 神经语音 + 韵律引擎 / Web Speech 兜底) → 3D viseme 口型/表情 + 注视转头`
+
+## 特性
+
+- 🗣️ **18 种表情 + 21 种动作**（ARKit 52 blendshape 全部启用）
+- 👀 **眼球注视 + 颈骨分层转头** — 眼睛先到、头后跟上，随机扫视 + 呼吸微摆
+- 🎤 **Edge 神经语音** + 句内抑扬顿挫韵律引擎 + 表情驱动声音情绪
+- 😮‍💨 **15 个 viseme 口型同步** — 逐字时间轴驱动，不依赖浏览器 boundary 事件
+- 🛠️ **工具调用框架** — 联网搜索等插件式工具，加一个函数就够
+- 🧠 **三层记忆** — 工作记忆 / 情景记忆 / 语义画像（含冲突确认）
+- 🎭 **可换脸 + 预览页** — `/app/preview.html` 试驱表情口型后再决定换哪个
+- ⚡ **流式对话 + 可打断** — 首句延迟 < 2s，随时打断自然收尾
+- 🔌 **多 LLM 供应商** — 火山引擎 Ark / llama.cpp / Ollama 一行配置切换
+
+## 快速开始
+
+```powershell
+# 1. 装依赖
+pip install -r backend/requirements.txt
+
+# 2. 填密钥
+copy .env.example .env
+# 编辑 .env，至少填 ARK_API_KEY 或 LLM_PROVIDER 切成本地模型
+
+# 3. 启动
+cd backend
+python server.py
+
+# 4. 打开浏览器
+# http://127.0.0.1:8000/app/index.html
+```
+
+更多说明见 `docs/superpowers/`。
+
+## 目录结构
+
+```
+myrobot/
+├── backend/                    Python 后端
+│   ├── pipeline/               核心管线（llm / agent / text_router / tts / prosody ...）
+│   ├── tools/                  插件式工具
+│   ├── memory/                 三层记忆
+│   └── server.py               FastAPI 入口
+├── frontend/                   浏览器前端
+│   └── src/                    head3d.js / tts.js / viseme.js / ws.js ...
+├── docs/superpowers/
+│   ├── prd.md                  需求文档
+│   └── specs/...               设计规格
+├── scripts/                    CI 检查脚本 + 工具
+└── avatar_candidates/          候选 3D 模型（不入库，本地预览用）
+```
 
 ## 本地自检
 
@@ -14,7 +64,9 @@ python -m compileall -q backend/ scripts/          # Python 语法
 python scripts/check_no_hardcoded_secrets.py       # 密钥硬编码扫描
 python scripts/check_tool_schemas.py               # 工具 JSON Schema 自检
 python scripts/check_memory.py                     # 记忆模块自检（67 项断言）
-node --check frontend/src/main.js                  # 前端 JS 语法
+python scripts/check_expressions.py                # 表情/动作 三处一致性 + blendshape 覆盖率
+python scripts/check_tts.py                        # TTS 帧解析 + 韵律规划 + 在线合成
+node --check frontend/src/*.js                     # 前端 JS 语法
 ```
 
 每次 `git push` 后 GitHub Actions 会自动跑同样的检查（`.github/workflows/checks.yml`），
