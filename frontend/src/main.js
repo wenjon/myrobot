@@ -22,7 +22,7 @@ const micBtn = document.getElementById('mic');
 let head = null;
 statusEl.textContent = '连接中…';
 createHead3D(canvas, './src/avatar.glb')
-  .then((h) => { head = h; console.log('[Head] 数字人加载完成'); })
+  .then((h) => { head = h; buildDebugPanel(h); console.log('[Head] 数字人加载完成'); })
   .catch((e) => { console.error('[Head] 数字人加载失败（不影响对话）:', e); });
 
 function log(role, text) {
@@ -55,7 +55,54 @@ function enterListening() {
   listenTimer = setTimeout(() => { if (head) head.setListening(false); }, 1500);
 }
 
-const EMOTION_SET = new Set(['平静', '开心', '悲伤', '生气', '惊讶', '疑惑']);
+// 表情白名单：必须与 head3d.js 的 EXPR 表、backend/config.py 的 SYSTEM_PROMPT 三处保持一致。
+// 不在白名单里的值降级成"平静"，避免模型胡编标记导致表情卡死。
+const EMOTION_SET = new Set([
+  '平静', '开心', '悲伤', '生气', '惊讶', '疑惑',
+  '害羞', '调皮', '无语', '思考', '尴尬', '得意',
+  '委屈', '惊恐', '厌恶', '困倦', '撒娇', '期待',
+]);
+
+// 动作分发表：动作名 -> 作用于 head 的函数。用表驱动而不是 if-else 链，
+// 新增动作只需在这里加一行 + 同步 config.py 的 prompt。
+const ACTION_MAP = {
+  // 头颈
+  '点头': (h) => h.triggerNod(),
+  '摇头': (h) => h.triggerShake(),
+  '歪头': (h) => h.triggerTilt(1),
+  // 注视（"左/右"以观众视角为准：看左 = 转向画面左侧）
+  '看左':   (h) => h.turnTo(-0.9),
+  '看右':   (h) => h.turnTo(0.9),
+  '看上':   (h) => h.lookUp(),
+  '看下':   (h) => h.lookDown(),
+  '环视':   (h) => h.lookAround(),
+  '看向对方': (h) => h.resetPose(),
+  '对视':   (h) => h.resetPose(),
+  // 眨眼
+  '眨眼':   (h) => h.triggerBlink('both'),
+  '眨左眼': (h) => h.triggerBlink('left'),
+  '眨右眼': (h) => h.triggerBlink('right'),
+  // 面部瞬时叠加动作（名称需与 head3d.js 的 OVERLAYS 对应）
+  '挑眉':   (h) => h.triggerOverlay('挑眉'),
+  '单挑眉': (h) => h.triggerOverlay('单挑眉'),
+  '皱眉':   (h) => h.triggerOverlay('皱眉'),
+  '鼓腮':   (h) => h.triggerOverlay('鼓腮'),
+  '撅嘴':   (h) => h.triggerOverlay('撅嘴'),
+  '吐舌':   (h) => h.triggerOverlay('吐舌'),
+  '咬唇':   (h) => h.triggerOverlay('咬唇'),
+  '努嘴':   (h) => h.triggerOverlay('努嘴'),
+};
+
+// 动作匹配：模型可能写成"轻轻点头""好奇地歪头"，所以用包含匹配。
+// 按名字从长到短匹配，防止"眨眼"抢先命中"眨左眼"。
+const ACTION_KEYS = Object.keys(ACTION_MAP).sort((a, b) => b.length - a.length);
+function dispatchAction(h, value) {
+  const v = String(value || '');
+  for (const k of ACTION_KEYS) {
+    if (v.includes(k)) { ACTION_MAP[k](h); return k; }
+  }
+  return null;
+}
 
 // WebSocket 地址：按当前页面协议自动选择 ws/wss，指向同源 /ws。
 // 关键：https 页面（如 Cloudflare 隧道）必须用 wss，否则浏览器会拦截 ws:// 明文连接（混合内容）。
@@ -80,8 +127,7 @@ const ws = connect(WS_URL, {
         const e = EMOTION_SET.has(msg.value) ? msg.value : '平静';
         head.setExpression(e);
       } else if (msg.action === '动作') {
-        if (msg.value.includes('点头')) head.triggerNod();
-        else if (msg.value.includes('摇头')) head.triggerShake();
+        dispatchAction(head, msg.value);
       }
     } else if (msg.type === 'status') {
       // 工具执行状态（如“正在联网搜索…”），显示在状态栏
@@ -115,6 +161,21 @@ function sendMessage() {
   log('user', text);
   input.value = '';
   statusEl.textContent = '思考中…';
+}
+
+// 调试面板：把所有表情/动作渲染成按钮，方便逐个肉眼预览（无需让模型配合）。
+// 数字人异步加载，所以延迟到 head 就绪后再建面板。
+const exprTestEl = document.getElementById('exprTest');
+function buildDebugPanel(h) {
+  if (!exprTestEl) return;
+  const add = (label, fn) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.onclick = fn;
+    exprTestEl.appendChild(b);
+  };
+  for (const name of h.expressionNames()) add(name, () => h.setExpression(name));
+  for (const name of ACTION_KEYS.slice().sort()) add('▸' + name, () => dispatchAction(h, name));
 }
 
 sendBtn.onclick = sendMessage;

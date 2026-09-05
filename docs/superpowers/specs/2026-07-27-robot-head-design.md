@@ -132,7 +132,7 @@ Qwen3 系列默认会先输出一大段**深度思考**（`reasoning_content`）
 - `src/ws.js` — WebSocket 客户端。
 - `src/tts.js` — Web Speech 合成 + `boundary` 时间戳 + `softStop`（渐弱软停）。
 - `src/viseme.js` — 字/拼音 → viseme 权重映射。
-- `src/head3d.js` — Three.js 加载 GLB（ARKit 52 动画 + Oculus viseme），表情 / 口型 / 点头 / 「我在听」倾听表情。
+- `src/head3d.js` — Three.js 加载 GLB（ARKit 52 blendshape + Oculus viseme）：18 种表情 / 口型 / 注视与眨眼 / 颈骨分层转头 / 面部叠加动作 / 自发微动 / 「我在听」倾听表情。详见第 7 章。
 - `src/main.js` — 装配与事件流（含 `enterListening`）。
 - `src/profile_card.js` — 画像冲突确认卡 UI（旧值删除线 / 新值高亮 / 提炼原句 / 确认与拒绝）。
 
@@ -166,7 +166,7 @@ Qwen3 系列默认会先输出一大段**深度思考**（`reasoning_content`）
 - 会话隔离在 sid 层，不在 ws 连接层；为了上下文不串用户，前端需每个会话独立生成 sid。
 
 LLM 输出约定（system prompt 引导）:
-- 短句口语化；可用行内标记表达动作，如 `[表情:开心]` / `[动作:点头]`。
+- 短句口语化；可用行内标记表达动作，如 `[表情:开心]` / `[动作:点头]`。完整清单见 7.2 / 7.3。
 - 中央调度（text_router.route）负责把标记剥离成 `action` 消息，纯文本作为 `sentence`。
 - 涉及实时 / 不确定内容需优先调用 web_search 进行联网查证。
 
@@ -184,31 +184,73 @@ LLM 输出约定（system prompt 引导）:
 - 对外接口：`visemeForChar(ch)` / `visemeForText(text)` / `CLOSED`。
 
 ### 7.2 表情（ARKit blendshape 组合）
-代码中 `head3d.js` 的 `EXPR` 表定义了 **6 种**表情，每种是一组 blendshape 权重的叠加：
+`head3d.js` 的 `EXPR` 表定义了 **18 种**表情，每种是一组 blendshape 权重的叠加。
+表情是**持续状态**，一直保持到下一次 `[表情:x]` 切换。
 
 | 表情 | 主要 blendshape |
 |---|---|
 | 平静 | （全零，基准态） |
-| 开心 | `mouthSmileLeft/Right` 0.8、`cheekSquintLeft/Right` 0.4、`browInnerUp` 0.15 |
-| 悲伤 | `mouthFrownLeft/Right` 0.7、`browInnerUp` 0.7、`eyeSquintLeft/Right` 0.3 |
-| 生气 | `browDownLeft/Right` 0.9、`noseSneerLeft/Right` 0.5、`mouthPressLeft/Right` 0.5 |
-| 惊讶 | `browInnerUp` 0.8、`browOuterUpLeft/Right` 0.7、`eyeWideLeft/Right` 0.8、`jawOpen` 0.3 |
-| 疑惑 | `browInnerUp` 0.5、`browOuterUpLeft` 0.6、`mouthLeft` 0.4、`eyeSquintLeft` 0.3 |
+| 开心 | `mouthSmile*` 0.8、`mouthDimple*` 0.4、`cheekSquint*` 0.4、`eyeSquint*` 0.2 |
+| 悲伤 | `mouthFrown*` 0.7、`browInnerUp` 0.7、`mouthShrugLower` 0.3 |
+| 生气 | `browDown*` 0.9、`noseSneer*` 0.5、`mouthPress*` 0.5、`jawForward` 0.2 |
+| 惊讶 | `browInnerUp` 0.8、`browOuterUp*` 0.7、`eyeWide*` 0.8、`jawOpen` 0.35 |
+| 疑惑 | `browInnerUp` 0.5、`browOuterUpLeft` 0.6、`mouthLeft` 0.4、`jawLeft` 0.1 |
+| 害羞 | `mouthSmile*` 0.45、`cheekSquint*` 0.6、`eyeSquint*` 0.4、`mouthShrugUpper` 0.2 |
+| 调皮 | `mouthSmileLeft` 0.75 / `Right` 0.3（不对称坏笑）、`tongueOut` 0.25 |
+| 无语 | `mouthShrugUpper` 0.6、`mouthClose` 0.25、`mouthRight` 0.2、`jawRight` 0.1 |
+| 思考 | `browOuterUpLeft` 0.55、`mouthRollLower` 0.45、`mouthLeft` 0.25 |
+| 尴尬 | `mouthStretch*` 0.6、`browInnerUp` 0.55、`eyeSquint*` 0.45（苦笑） |
+| 得意 | `mouthSmile*` 0.7、`jawForward` 0.3、`browDown*` 0.25 |
+| 委屈 | `mouthFrown*` 0.6、`browInnerUp` 0.85、`mouthPucker` 0.4 |
+| 惊恐 | `eyeWide*` 1.0、`browInnerUp` 0.95、`jawOpen` 0.6、`mouthStretch*` 0.4 |
+| 厌恶 | `noseSneer*` 0.8、`mouthUpperUp*` 0.6/0.45、`eyeSquintLeft` 0.55 |
+| 困倦 | `eyeBlink*` 0.55（半闭）、`jawOpen` 0.2、`mouthLowerDown*` 0.2 |
+| 撒娇 | `cheekPuff` 0.6、`mouthPucker` 0.65、`browInnerUp` 0.5 |
+| 期待 | `eyeWide*` 0.55、`mouthSmile*` 0.55、`browInnerUp` 0.45、`jawOpen` 0.12 |
 
 - 由 `action` 消息（`{"type":"action","action":"表情","value":"开心"}`）驱动，**插值过渡**避免突变。
-- 动作类（`点头`/`摇头`）不走 blendshape，而是直接旋转头部 mesh。
+- 切表情时先把 `EXPR_KEYS` 全体归零再套新值，避免上一个表情残留（如「惊恐」切「平静」眼睛还睁着）。
 - 额外的「我在听」倾听表情（`setListening`）不属于上表，是被打断时的自然收尾，详见 11.4。
 
-### 7.3 自定义表情的能力边界
-因为底层是 ARKit 52 路 blendshape，**理论上可以组合出任意表情**，包括不对称动作（如「左眼睁右眼闭」= `eyeBlinkRight:1.0` 单侧置位）。
-新增一种表情只需在 `EXPR` 里加一行，并在 `SYSTEM_PROMPT` 里告知 LLM 该标记可用。
+### 7.3 动作系统（非 blendshape 表情的其余能力）
+除表情外还有三类**一次性动作**，由 `[动作:x]` 触发，`main.js` 的 `ACTION_MAP` 表驱动分发：
+
+| 类别 | 动作 | 实现 |
+|---|---|---|
+| 头颈 | 点头、摇头、歪头 | 正弦包络叠加到 `Neck`(60%) + `Head`(40%) 两根骨骼的欧拉角 |
+| 注视 | 看左、看右、看上、看下、环视、对视 | 8 个 `eyeLook*` blendshape + `LeftEye`/`RightEye` 骨骼微转，头颈随后跟上 |
+| 眨眼 | 眨眼、眨左眼、眨右眼 | `eyeBlinkLeft/Right`，单眼眨（wink）时只压一侧 |
+| 面部叠加 | 挑眉、单挑眉、皱眉、鼓腮、撅嘴、吐舌、咬唇、努嘴 | `OVERLAYS` 表，在当前表情基准值之上做 `0 → peak → 0` 的正弦包络，结束后回落到基准 |
+
+三个设计要点：
+
+1. **分层而非覆盖**：注视系统独占 `eyeLook*`，眨眼独占 `eyeBlink*`，表情用其余 42 个，
+   叠加动作则记录 `exprBase` 后做增量相加。任何两层同时生效都不会互相抹掉。
+2. **转颈骨而不是转 root**：早期实现旋转整个 `root`，视觉上是「整个人歪了」；
+   现在按 6:4 分给 `Neck`/`Head`，才是「人在转头」。所有旋转都基于 `rest` 静止姿态做增量，不会累积漂移。
+3. **无指令时的自发微动**：随机扫视（saccade，1.2~3.8s 一次）+ 头部低频摆动 + `Spine1` 呼吸起伏（约 15 次/分）。
+   这三项与语义无关，但去掉了「雕像感」，是性价比最高的「活着」感来源。
+
+### 7.4 覆盖率与自定义边界
+`avatar.glb` 共 **67 个 blendshape** = 15 viseme + 52 ARKit，另有 67 根骨骼、0 个预制动画
+（Ready Player Me 标准骨架，动作全部程序化生成）。当前 **52/52 个 ARKit blendshape 已全部用上**。
+
+新增一种表情/动作需**同步三处**，否则前端会把标记降级丢弃：
+
+| 文件 | 位置 | 作用 |
+|---|---|---|
+| `frontend/src/head3d.js` | `EXPR` / `OVERLAYS` | blendshape 组合定义 |
+| `frontend/src/main.js` | `EMOTION_SET` / `ACTION_MAP` | 白名单与分发（不在名单内降级为「平静」） |
+| `backend/config.py` | `SYSTEM_PROMPT` | 告知 LLM 有哪些标记可用 |
+
+`index.html` 的 `#exprTest` 面板会自动列出全部表情与动作按钮，改完可直接点按钮肉眼验证，无需让模型配合。
 
 ## 8. 验收标准（Demo 级）
 
 ### 8.1 基础对话链路
 - 输入一句中文，数字人能**流式**逐句播报并做口型动画，首句可见延迟主观“较快”。
 - 口型与语音大致同步（demo 级，不追求 ≤120ms 硬指标）。
-- LLM 输出的 `[表情:x]` / `[动作:x]` 能驱动表情与点头/摇头。
+- LLM 输出的 `[表情:x]` / `[动作:x]` 能驱动 18 种表情与头颈/注视/眨眼/面部叠加动作。
 - 前端 TTS 用浏览器 Web Speech，**不依赖外部语音服务**。
 
 ### 8.2 工具调用（第 10 章）
