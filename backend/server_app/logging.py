@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from datetime import datetime
 from typing import Dict, List
 
@@ -25,10 +26,21 @@ class ContextLogger:
             self._fh = None
 
     def emit(self, line: str) -> None:
-        """Emit a line to console (when enabled) and to file (if open)."""
+        """Emit a line to console (when enabled) and to file (if open).
+
+        控制台编码兜底：Windows 默认 stdout 是 GBK，而联网搜索等工具会带回
+        U+200E(LRM) / emoji 等 GBK 编不出的字符，直接 print 会抛
+        UnicodeEncodeError 并让整轮对话失败（曾实际发生）。
+        这里按控制台实际编码做一次可损转换，日志文件仍是完整 utf-8。
+        """
         if not LOG_CONTEXT:
             return
-        print(line, flush=True)
+        try:
+            print(line, flush=True)
+        except UnicodeEncodeError:
+            enc = (getattr(sys.stdout, 'encoding', None) or 'utf-8')
+            print(line.encode(enc, errors='replace').decode(enc, errors='replace'),
+                  flush=True)
         if self._fh:
             self._fh.write(line + "\n")
             self._fh.flush()
