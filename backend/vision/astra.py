@@ -24,7 +24,10 @@ import os
 import time
 from typing import Optional
 
-import numpy as np
+# 注意：**不要**在模块顶层 import numpy。
+# numpy 只在 read()/depth_at() 里真正用到，而本模块要在没有第三方依赖的环境里
+# 也能被 import（CI 的静态检查就是在 pip install 之前跑的），
+# 顶层 import 会让 check_vision.py 在 CI 里直接 ModuleNotFoundError。
 
 # Astra 深度帧的常见分辨率（按面积反推，见模块 docstring 的说明）
 _KNOWN_SHAPES = {
@@ -150,8 +153,10 @@ class AstraDepth:
         return True
 
     # ---------- 读帧 ----------
-    def read(self) -> Optional[np.ndarray]:
+    def read(self) -> Optional["np.ndarray"]:
         """返回 (H,W) uint16 深度图（毫米，0=无效），暂无帧返回 None。"""
+        import numpy as np   # 延迟导入，见模块顶部说明
+
         if not self._opened:
             return None
         self._f_update()
@@ -192,12 +197,14 @@ class AstraDepth:
         return (x_pixel - width / 2.0) * (self.hfov_deg / width)
 
     @staticmethod
-    def depth_at(depth: np.ndarray, x: int, y: int, window: int = 10) -> Optional[float]:
+    def depth_at(depth: "np.ndarray", x: int, y: int, window: int = 10) -> Optional[float]:
         """取 (x,y) 邻域内有效深度的中位数，返回米；全无效返回 None。
 
         用中位数而不是均值：结构光在边缘/反光处会有少量离谱的野值，
         均值会被它们带偏。mask 掉 0（无回波）再算。
         """
+        import numpy as np   # 延迟导入，见模块顶部说明
+
         if depth is None:
             return None
         h, w = depth.shape[:2]

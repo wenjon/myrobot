@@ -26,6 +26,7 @@ from vision.detector import resolve_weights, to_zh  # noqa: E402
 from vision.tracker import CentroidTracker  # noqa: E402
 
 failures = []
+skipped = []   # 因环境缺依赖而跳过的用例（如 CI 里没有 numpy）
 
 
 def check(label, got, want):
@@ -103,18 +104,26 @@ check("方位: 左边缘约 -hfov/2", round(left, 2), round(-58.59 / 2, 2))
 a2 = AstraDepth("")
 check("方位: 无 hfov 时返回 0", a2.bearing_deg(0, 640), 0.0)
 
-# 取深度：中位数 + 忽略 0（无回波）
-import numpy as np  # noqa: E402
-dmap = np.zeros((480, 640), dtype=np.int16)
-dmap[230:250, 310:330] = 1500          # 1.5m 的一片有效区域
-dmap[230:250, 310:330:6] = 0           # 掺几个无效点，验证会被忽略
-got = AstraDepth.depth_at(dmap, 320, 240, window=10)
-check("取深度: 1.5m 区域", got, 1.5)
-check("取深度: 全无效区域返回 None", AstraDepth.depth_at(dmap, 10, 10), None)
-check("取深度: None 输入返回 None", AstraDepth.depth_at(None, 10, 10), None)
-# 中位数而非均值：加一个野值，结果应仍是 1.5 而不是被拉偏
-dmap[240, 320] = 9000
-check("取深度: 抗野值(用中位数)", AstraDepth.depth_at(dmap, 320, 240, window=10), 1.5)
+# 取深度：中位数 + 忽略 0（无回波）。
+# 这一段要 numpy，而 CI 的静态检查是在 pip install **之前**跑的（那里没有 numpy），
+# 所以有就测、没有就跳过并明说——不能因为缺 numpy 就让整个检查失败。
+try:
+    import numpy as np  # noqa: E402
+except ImportError:
+    np = None
+
+if np is None:
+    skipped.append("取深度用例（需要 numpy；CI 的静态检查环境不装 numpy）")
+else:
+    dmap = np.zeros((480, 640), dtype=np.int16)
+    dmap[230:250, 310:330] = 1500          # 1.5m 的一片有效区域
+    dmap[230:250, 310:330:6] = 0           # 掺几个无效点，验证会被忽略
+    check("取深度: 1.5m 区域", AstraDepth.depth_at(dmap, 320, 240, window=10), 1.5)
+    check("取深度: 全无效区域返回 None", AstraDepth.depth_at(dmap, 10, 10), None)
+    check("取深度: None 输入返回 None", AstraDepth.depth_at(None, 10, 10), None)
+    # 中位数而非均值：加一个野值，结果应仍是 1.5 而不是被拉偏
+    dmap[240, 320] = 9000
+    check("取深度: 抗野值(用中位数)", AstraDepth.depth_at(dmap, 320, 240, window=10), 1.5)
 
 # ---- 报告 ----
 if failures:
@@ -123,3 +132,5 @@ if failures:
         print("  [x] " + f)
     sys.exit(1)
 print("OK：视觉子系统纯逻辑自检通过（追踪 id / 类名中文化 / 权重路径 / 结构光方位与深度取值）")
+for s in skipped:
+    print("  跳过: " + s)
