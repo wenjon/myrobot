@@ -75,6 +75,19 @@ for x in sorted(action_cfg - action_main):
 for x in sorted(overlay_js - action_main):
     errors.append(f"叠加动作「{x}」定义在 head3d.js OVERLAYS，但 main.js ACTION_MAP 未接")
 
+# text_router.py 也存了一份名单，用来识别模型漏写前缀的简写标记（[开心]）。
+# 它漂移的后果很隐蔽：不认识的词既不驱动表情，标记本身还会被当成正文念出来。
+sys.path.insert(0, str(ROOT / "backend"))
+from pipeline.text_router import EMOTIONS as router_emotions, ACTIONS as router_actions  # noqa: E402
+
+compare("表情", router_emotions, "text_router.py EMOTIONS", emotion_main, "main.js EMOTION_SET")
+# 动作同 ACTION_MAP 的超集语义：router 必须认全 prompt 教的动作，
+# 但不能认 main.js 分发不了的动作（反向允许别名，如 看向对方）。
+for x in sorted(action_cfg - router_actions):
+    errors.append(f"动作「{x}」写进了 config.py prompt，但 text_router.py ACTIONS 不认，简写标记不会被识别")
+for x in sorted(router_actions - action_main):
+    errors.append(f"动作「{x}」在 text_router.py ACTIONS 里，但 main.js ACTION_MAP 无法分发")
+
 # ---- 2) blendshape 覆盖率 ----
 glb = (ROOT / "frontend/src/avatar.glb").read_bytes()
 ln = struct.unpack_from("<I", glb, 12)[0]
@@ -100,4 +113,4 @@ if errors:
     for e in errors:
         print("  [x] " + e)
     sys.exit(1)
-print("\nOK：表情/动作在 head3d.js、main.js、config.py 三处定义一致")
+print("\nOK：表情/动作在 head3d.js、main.js、config.py、text_router.py 四处定义一致")

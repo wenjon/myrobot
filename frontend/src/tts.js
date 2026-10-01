@@ -22,6 +22,16 @@ let currentRaf = 0;           // edge 路径的口型驱动帧循环
 let currentSeq = -1;
 let stopped = false;          // cancel/softStop 置位，避免在途请求回来后又开口
 
+// 播报彻底停下（队列排空）时通知上层。
+// 为什么需要这个："本轮回答结束"必须以**声音播完**为准，不能用服务端的 llm_done——
+// llm_done 只代表 LLM 生成完了，此时前端往往还有好几句在排队播放。
+// 之前用 llm_done 恢复收音，麦克风会在数字人还在说话时就打开，
+// 于是它把自己的话听成了用户输入（回声自激，实测复现过）。
+let onIdleCb = null;
+export function setOnIdle(cb) { onIdleCb = cb; }
+export function isSpeaking() { return speaking; }
+function fireIdle() { if (onIdleCb) { try { onIdleCb(); } catch { /* 上层异常不影响 TTS */ } } }
+
 // ---- 引擎配置：启动时向后端拉一次 ----
 let engine = 'web';           // 'edge' | 'web'
 let ttsConfig = {};
@@ -87,7 +97,12 @@ function fetchAudio(text) {
 }
 
 function next() {
-  if (queue.length === 0) { speaking = false; return; }
+  if (queue.length === 0) {
+    // 队列真正排空（最后一句也播完了）才算「这轮说完」。
+    speaking = false;
+    fireIdle();
+    return;
+  }
   speaking = true;
   stopped = false;
   const item = queue.shift();
@@ -200,6 +215,7 @@ export function cancel() {
   if (speechSynthesis.speaking) speechSynthesis.cancel();
   currentUtterance = null;
   speaking = false;
+  fireIdle();          // 被动中止也要通知，否则收音会一直停在暂停态
 }
 
 // softStop：“被打断”时的自然收尾，不像 cancel() 那样硬生生戳断。
@@ -220,7 +236,7 @@ export function softStop(fadeMs = 220) {
     const fade = setInterval(() => {
       i += 1;
       audio.volume = Math.max(0, 1 - i / steps);
-      if (i >= steps) { clearInterval(fade); stopAudio(); speaking = false; }
+      if (i >= steps) { clearInterval(fade); stopAudio(); speaking = false; fireIdle(); }
     }, dt);
     return;
   }
@@ -230,9 +246,11 @@ export function softStop(fadeMs = 220) {
       try { speechSynthesis.cancel(); } catch {}
       currentUtterance = null;
       speaking = false;
+      fireIdle();
     }, fadeMs);
   } else {
     currentUtterance = null;
     speaking = false;
+    fireIdle();
   }
 }

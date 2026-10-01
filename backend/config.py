@@ -31,8 +31,21 @@ def _load_env_file(path: Path = _ENV_FILE) -> None:
 _load_env_file()
 
 # ---- LLM 供应商切换 ----
-# provider = "ark"（火山引擎 Ark，OpenAI 兼容）/ "ollama"（本地）/ "llamacpp"（本地 llama.cpp OpenAI 兼容服务）
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ark")
+# provider = "maas"（阿里云百炼 Model Studio，OpenAI 兼容，默认）/ "ark"（火山引擎 Ark）/
+#            "ollama"（本地）/ "llamacpp"（本地 llama.cpp OpenAI 兼容服务）
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "maas")
+
+# ---- 阿里云百炼 MaaS（OpenAI 兼容 /compatible-mode/v1）----
+# 与 Ark 走同一套 OpenAI 协议，区别只在 base_url / key / model 三项。
+# 密钥同样不落代码：从环境变量 / .env 读取，缺失时为空字符串（启动时会给出提示）。
+MAAS_BASE_URL = os.getenv(
+    "MAAS_BASE_URL", "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+)
+MAAS_API_KEY = os.getenv("MAAS_API_KEY", "")
+MAAS_MODEL = os.getenv("MAAS_MODEL", "qwen3.6-flash")
+# Qwen3 系列混元/百炼端点在开启思考时会先吐一大段 reasoning_content，
+# 语音对话要求秒级开口，默认关闭；需要深度思考时设 MAAS_ENABLE_THINKING=1。
+MAAS_ENABLE_THINKING = os.getenv("MAAS_ENABLE_THINKING", "0") == "1"
 
 # 本地 Ollama
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
@@ -166,6 +179,62 @@ PROFILE_FIELDS = ["name", "preferences", "occupation"]
 PROFILE_CONFLICT_TIMEOUT_S = int(os.getenv("PROFILE_CONFLICT_TIMEOUT_S", "60"))
 # 一轮最多下发多少条冲突确认卡，超出的只写日志，下轮重评估
 PROFILE_MAX_CONFLICTS_PER_TURN = int(os.getenv("PROFILE_MAX_CONFLICTS_PER_TURN", "3"))
+
+# ---- 语音识别（ASR）----
+# 默认走浏览器 Web Speech 的 SpeechRecognition（零依赖、无需密钥、实时出字），
+# 前端默认常开麦克风监听，识别到停顿即自动发送给大模型。
+# 关掉默认自动监听（改成必须手动点麦克风）设 VOICE_AUTOSTART=0。
+VOICE_AUTOSTART = os.getenv("VOICE_AUTOSTART", "1") == "1"
+# 静音多久判定"这句话说完了"并自动提交（毫秒）。太小会切碎长句，太大会显得迟顿。
+VOICE_SILENCE_MS = int(os.getenv("VOICE_SILENCE_MS", "1200"))
+# 播报彻底停止后，再等多久才恢复收音（毫秒）。
+# 为什么必须留这段：喇叭余音与房间混响会拖一小截尾巴，立刻开麦会把这段
+# 尾巴当成用户输入（回声自激）。300~500ms 是实测比较稳的区间。
+VOICE_RESUME_DELAY_MS = int(os.getenv("VOICE_RESUME_DELAY_MS", "400"))
+# 识别语言
+ASR_LANG = os.getenv("ASR_LANG", "zh-CN")
+
+# ---- 视觉子系统（双目/单目相机 → 识别 + 深度，前端左下角浮层）----
+# 移植自 D:\agentos\VisionDev，做成**可选**：依赖缺失或相机不可用时整个子系统
+# 优雅关闭，对话链路完全不受影响。
+VISION_ENABLED = os.getenv("VISION_ENABLED", "1") == "1"
+# 相机模式：auto（依次试 双目并排 → 单目 → 双相机）/ single / dual / mono
+#   单目没有视差，出「识别 + 方位」，深度栏显示未知；插上双目后自动出真实距离。
+VISION_CAMERA_MODE = os.getenv("VISION_CAMERA_MODE", "auto")
+VISION_CAMERA_INDEX = int(os.getenv("VISION_CAMERA_INDEX", "0"))      # single/mono 用
+VISION_LEFT_INDEX = int(os.getenv("VISION_LEFT_INDEX", "0"))          # dual 用
+VISION_RIGHT_INDEX = int(os.getenv("VISION_RIGHT_INDEX", "1"))        # dual 用
+VISION_WIDTH = int(os.getenv("VISION_WIDTH", "640"))
+VISION_HEIGHT = int(os.getenv("VISION_HEIGHT", "480"))
+# 双目标定：distance = focal_length * baseline / disparity。
+# 换相机后需要重新标定，否则距离不准（这是物理量，无法靠代码猜）。
+VISION_FOCAL_LENGTH = float(os.getenv("VISION_FOCAL_LENGTH", "700.0"))
+VISION_BASELINE = float(os.getenv("VISION_BASELINE", "0.06"))         # 两镜头间距（米）
+VISION_MIN_DISTANCE = float(os.getenv("VISION_MIN_DISTANCE", "0.2"))
+VISION_MAX_DISTANCE = float(os.getenv("VISION_MAX_DISTANCE", "20.0"))
+# YOLO 检测：模型名、置信度阈值、设备、每 N 帧检测一次。
+# CPU 上检测较慢，隔帧检测 + 追踪器兜住中间帧，是保证画面流畅的关键。
+# 权重解析顺序见 vision/detector.py::resolve_weights：仓库内 backend/vision/weights/
+# → VISION_MODEL_DIR 指向的目录 → 交给 ultralytics 自行下载（本机连不上 GitHub，
+# 所以前两条至少要命中一条，否则模型加载会一直重试）。
+VISION_YOLO_MODEL = os.getenv("VISION_YOLO_MODEL", "yolov8n.pt")
+# 额外的权重搜索目录（可选）。留空即可——把 .pt 放进 backend/vision/weights/ 最省事；
+# 想复用别处已下好的权重再设这个。
+VISION_MODEL_DIR = os.getenv("VISION_MODEL_DIR", "")
+VISION_YOLO_CONF = float(os.getenv("VISION_YOLO_CONF", "0.4"))
+VISION_YOLO_DEVICE = os.getenv("VISION_YOLO_DEVICE", "cpu")
+VISION_DETECT_EVERY_N = int(os.getenv("VISION_DETECT_EVERY_N", "3"))
+# MJPEG 流画质与帧率上限（帧率靠管线自身的检测节奏控制，这里只控画质）
+VISION_JPEG_QUALITY = int(os.getenv("VISION_JPEG_QUALITY", "70"))
+
+# ---- 结构光深度相机（Orbbec Astra Pro）----
+# 这台相机由两个 USB 设备组成：PID_0403 是深度（厂商私有接口），PID_0501 是 RGB（走 UVC）。
+# OpenCV 只能看到 RGB，所以深度必须走厂商的 Astra SDK（C API，ctypes 调用）。
+VISION_USE_ASTRA = os.getenv("VISION_USE_ASTRA", "1") == "1"
+# Astra SDK 的 bin 目录（里面有 astra_core.dll / astra.dll / orbbec.dll）。
+# 留空则不用结构光深度，退回「单目：只有方位」。安装包位置因机器而异，
+# 所以不给默认路径，需要时在 .env 里指一下。
+VISION_ASTRA_SDK_DIR = os.getenv("VISION_ASTRA_SDK_DIR", "")
 
 # ---- 上下文日志 ----
 # 是否在控制台/文件打印每轮上下文与输出

@@ -25,11 +25,12 @@
 
 | 环节 | 方案 | 说明 |
 |------|------|------|
-| LLM | **三选一**：`ark`（火山引擎，云端，默认）/ `llamacpp`（本地 llama.cpp server，OpenAI 兼容）/ `ollama`（本地 `/api/chat`） | 供应商可切换（`config.LLM_PROVIDER`）；详见 2.1 |
+| LLM | **四选一**：`maas`（阿里云百炼 Model Studio，云端，默认）/ `ark`（火山引擎，云端）/ `llamacpp`（本地 llama.cpp server，OpenAI 兼容）/ `ollama`（本地 `/api/chat`） | 供应商可切换（`config.LLM_PROVIDER`）；详见 2.1 |
 | TTS | **Edge 神经语音**（`edge-tts`，服务端合成）+ 浏览器 Web Speech 兜底 | 神经语音自然度远高于本机 SAPI；返回逐字时间轴用于口型；失败自动降级，详见第 18 章 |
 | 口型对齐 | Edge WordBoundary 逐字时间轴（或 Web Speech `boundary` 事件）→ 拼音/音素 → viseme | 前端实时驱动，符合“时间戳=基准时钟” |
 | 虚拟头 | **Three.js 3D 数字人**（`avatar.glb`，GLTFLoader + 透视相机） | ARKit 52 blendshape 表情 + Oculus viseme 口型，WebGL 渲染 |
-| ASR | 浏览器 **Web Speech Recognition**（可选）+ 文本输入兜底 | 无麦克风也能跑；后续可替换 faster-whisper |
+| ASR | 浏览器 **Web Speech Recognition**（**默认输入方式**，常开麦克风 + 静音自动提交）+ 文本输入并存 | 打开页面即开始听，说完停顿自动发给大模型；打字随时可用；后续可替换 faster-whisper |
+| 视觉 | 相机 + **YOLO** 检测 + **结构光深度**（Orbbec Astra Pro，Astra SDK C API）/ 双目视差（`backend/vision/`，移植自 VisionDev） | 前端左下角浮层显示实时画面、物体与真实距离；可选依赖，缺失自动降级，见第 13.1c |
 | 后端 | **Python FastAPI + WebSocket** | 承载 LLM 流式转发 + 文本解析中央调度 |
 | 通信 | WebSocket 全双工流式 | 边收边推边出 |
 
@@ -37,15 +38,17 @@
 - **~~为什么 TTS 放前端~~** ⚠️ **结论已推翻**：初版因「本机 edge-tts 取不到音频」而把 TTS 放前端。——问题实为 edge-tts ≥7 默认 `boundary="SentenceBoundary"`，一句只回一个 mark 显得「拿不到时间戳」；显式传 `WordBoundary` 即可。现默认走服务端 Edge 神经语音，Web Speech 保留为降级兜底。详见第 18 章。
 - **为什么 3D 而不是 Wav2Lip/SadTalker/MuseTalk**：后者都依赖 NVIDIA CUDA（本机是 AMD 显卡，ROCm 不支持 Windows），而且它们是「整段音频 → 出 mp4」的**离线批处理**，与本方案的低延迟/可打断目标相冲。Three.js 方案纯 WebGL 渲染，无需 GPU 推理，实时驱动口型与表情，集显也能跑。
 
-### 2.1 三个 LLM 供应商的取舍
+### 2.1 四个 LLM 供应商的取舍
 
 | provider | 端点 | 默认模型 | 密钥 | 适用场景 |
 |---|---|---|---|---|
-| `ark` | `https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions` | `ark-code-latest` | 需 `ARK_API_KEY` | 本机无强 GPU，要求回答质量 |
+| `maas`（默认） | `https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions` | `qwen3.6-flash` | 需 `MAAS_API_KEY` | 阿里云百炼 Model Studio，OpenAI 兼容；默认供应商 |
+| `ark` | `https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions` | `ark-code-latest` | 需 `ARK_API_KEY` | 火山引擎，要求回答质量 |
 | `llamacpp` | `http://127.0.0.1:8080/v1/chat/completions` | `Qwen3.6-35B-A3B-MTP` | 默认无需（可选 `LLAMACPP_API_KEY`） | 本地推理、离线可用、不计费 |
 | `ollama` | `http://127.0.0.1:11434/api/chat` | `gemma4:12b` | 不需 | 已装 Ollama 的环境 |
 
-三者在 `llm_client.py` 里各有 `_stream` / `_once` / `_with_tools` 三个实现，
+`maas` 与 `ark` 同构（均为 OpenAI 协议 SSE），差异只在 base_url / key / model 三项。
+四者在 `llm_client.py` 里各有 `_stream` / `_once` / `_with_tools` 三个实现，
 对外统一成 `stream_chat` / `chat_once` / `chat_with_tools`，**上层不感知供应商**。
 
 #### Qwen3 思考模式开关（对语音对话很关键）
@@ -111,7 +114,7 @@ Qwen3 系列默认会先输出一大段**深度思考**（`reasoning_content`）
   - `notify.py` — 服务端主动下发辅助消息（如 `interrupted`）。
 - `pipeline/` — 业务管线：
   - `llm_client.py` — LLM 流式客户端（Ark 与 Ollama 两套，`stream_chat` / `chat_once` / `chat_with_tools`）。
-  - `text_router.py` — 中央调度：清洗 / 智能分句 / 动作抽取。
+  - `text_router.py` — 中央调度：清洗 / 智能分句 / 动作抽取（含 `[开心]` 简写标记识别）。
   - `conversation.py` — 多轮上下文与记忆管理（P0 安全提交 + P1 滑动窗口 + 反思沉淀 + TTL 回收）；模块层持有全局单例 `conversations`。
   - `agent.py` — 工具调用编排（两阶段：探测/工具循环 → 流式最终答）。
   - `turn_policy.py` — smart 轮次策略分类（`classify_incoming`：interrupt / backchannel / question）。
@@ -170,6 +173,28 @@ Qwen3 系列默认会先输出一大段**深度思考**（`reasoning_content`）
 LLM 输出约定（system prompt 引导）:
 - 短句口语化；可用行内标记表达动作，如 `[表情:开心]` / `[动作:点头]`。完整清单见 7.2 / 7.3。
 - 中央调度（text_router.route）负责把标记剥离成 `action` 消息，纯文本作为 `sentence`。
+
+**标记解析（实测教训，必读）**：大模型**不会**照上面写。实测它输出的是
+`[疑惑:疑惑] 发送什么呀？ [歪头:歪头] 我没听懂呢。 [眨眼:眨眼] 能再说清楚点吗？`
+——即「名称:名称」。老解析只认 `表情/emotion/Emotion/动作/action` 四个类型词，
+于是只有 `[疑惑:疑惑]` 生效，`[歪头:歪头]`/`[眨眼:眨眼]` 既不触发动作，
+又被原样当正文送进 TTS 念出来（现象：「数字人不动 + 把括号里的字念出来」）。
+
+现改为 `MARKER_RE` 只负责扫出 `[...]` 候选，类型判别全部交给 `_classify_bracket`，
+**一律以名字为准**（名字在 `EMOTIONS`/`ACTIONS` 名单里就认，前缀是什么类型词都行）：
+
+| 写法 | 例 | 结果 |
+|---|---|---|
+| 类型前缀 | `[表情:开心]` | 表情=开心 |
+| 名称:名称 | `[歪头:歪头]` | 动作=歪头 |
+| 名称:强度 | `[眨眼:1.0]` | 动作=眨眼 |
+| 裸名称 | `[开心]` | 表情=开心 |
+| 自创类型词 | `[手势:摇头]` | 动作=摇头 |
+| 正常文本 | `[重要]` `[1]` `[求点头]` `[时间:12:00]` | 原样保留，不产生 action |
+
+回归用例（含上述真实日志字符串）固化在 `scripts/check_text_router.py`，已进 CI。
+注意：正文里的半角/全角冒号仍会被 `WEAK_PUNCT` 当次级断句符切开，这是既有分句行为，
+与标记识别无关——保护的是「内容不丢、不误判成 action」，不是分句边界。
 - 涉及实时 / 不确定内容需优先调用 web_search 进行联网查证。
 
 ## 6. 分句算法（要点）
@@ -666,10 +691,37 @@ python scripts/check_tool_schemas.py
   3) 新一轮 `sentence` 到达时自动 `setListening(false)`；兜底 1.5s 后自动退出倾听。
 注：Web Speech API 无法中途改音量，“渐弱”实为短延迟 cancel 的近似实现。
 
-### 11.5 上下文处理
+### 11.5 收音的暂停与恢复（防回声自激，实测踩过）
+
+**问题现象**：数字人说的话被自己的麦克风听走，当成用户输入又发了一轮
+（实测复现：小柚说完「找老子有何贵干？」，下一帧「你」说的正是这句）。
+
+**根因**：恢复收音原先挂在 `llm_done` 上，而 `llm_done` 只代表**LLM 生成完了**，
+此时前端 TTS 队列里往往还有好几句在预取排队、逐句播放。麦克风在这个窗口里被打开，
+就把还在播的小柚自己的声音识别成了用户输入。
+
+**修法**：判定「本轮说完」以**声音播完**为准，而不是模型生成完。
+
+- `tts.js` 在队列真正排空时（`next()` 里 `queue.length === 0`）触发 `onIdle`；
+- `cancel()` / `softStop()` 等被动中止路径也触发，避免麦克风永久停在暂停态
+  （软停是渐弱收尾，必须等它静下来再恢复，否则渐弱尾巴会被听进去）；
+- `main.js` 通过 `setOnIdle()` 恢复收音，`llm_done` 与 `interrupted` 都不再直接恢复。
+
+配合 `main.js` 收到 `sentence` 时的 `asr.pause()`，形成完整互斥：
+**开口即静音、彻底播完静置一小段才开麦**。不变式已用桩件固化验证（只有队列排空才允许恢复）。
+
+两个易漏的细节（都已在代码里处理）：
+
+- **余音衰减窗口**：播完后不能立刻开麦，要再等 `VOICE_RESUME_DELAY_MS`（默认 400ms）
+  让喇叭余音与房间混响衰减掉。这一层「ASR 门控」是最有效、也最省成本的做法（全双工
+  的替代方案需要 TTS 文本相似度比对 + 置信度门槛，复杂度高得多）。
+- **等待期间又开口**：若新一轮 `sentence` 在恢复倒计时内到达，必须 `clearTimeout` 掉
+  那个定时器，否则它到点会在播报中途开麦，等于又把话筒递给它自己。
+
+### 11.6 上下文处理
 被打断那轮已产出的文本仍写入会话历史（部分回答）；附和词不入队也不打断，仅日志记录。
 
-### 11.6 新增 WS 消息
+### 11.7 新增 WS 消息
 - 服务端 → 客户端：`{"type":"interrupted","reason":"question|interrupt|always"}`。
 
 
@@ -722,12 +774,31 @@ async def lifespan(app: FastAPI):
 ### 13.1 LLM 供应商（LLM_PROVIDER 切换）
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `LLM_PROVIDER` | `ark` | `ark`·火山引擎 Ark（OpenAI 兼容）或 `ollama`·本圻 |
-| `OLLAMA_URL` | `http://127.0.0.1:11434` | 本场 Ollama 服务地址 |
-| `OLLAMA_MODEL` | `gemma4:12b` | Ollama 上要拉起来的模型名 |
+| `LLM_PROVIDER` | `maas` | `maas`·阿里云百炼（默认）/ `ark`·火山引擎 / `llamacpp`·本地 / `ollama`·本地 |
+
+**阿里云百炼 Model Studio（`LLM_PROVIDER=maas`，默认）**
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `MAAS_BASE_URL` | `https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1` | OpenAI 兼容基址（注意带 `/compatible-mode/v1`） |
+| `MAAS_API_KEY` | （空） | 必填；从 `.env` 读取，不落代码（见第 14 章） |
+| `MAAS_MODEL` | `qwen3.6-flash` | 模型名 |
+| `MAAS_ENABLE_THINKING` | `0` | `0`=关掉思考（秒回，适配语音）；`1`=开启（先吐一大段 reasoning，慢） |
+
+**火山引擎 Ark（`LLM_PROVIDER=ark`）**
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
 | `ARK_BASE_URL` | `https://ark.cn-beijing.volces.com/api/coding/v3` | Ark 接口地址（OpenAI 兼容 `/chat/completions`） |
-| `ARK_API_KEY` | 硬编码在仓里 | 生成函数调用的凭证；生产可迁到 .env |
+| `ARK_API_KEY` | （空） | 从 `.env` 读取，不落代码（见第 14 章） |
 | `ARK_MODEL` | `ark-code-latest` | Ark 上要用的模型 |
+
+**本地 Ollama（`LLM_PROVIDER=ollama`）**
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `OLLAMA_URL` | `http://127.0.0.1:11434` | 本机 Ollama 服务地址 |
+| `OLLAMA_MODEL` | `gemma4:12b` | Ollama 上要拉起来的模型名 |
 
 **本地 llama.cpp server（`LLM_PROVIDER=llamacpp`）**
 
@@ -736,7 +807,65 @@ async def lifespan(app: FastAPI):
 | `LLAMACPP_URL` | `http://127.0.0.1:8080/v1` | OpenAI 兼容基址（注意带 `/v1`） |
 | `LLAMACPP_MODEL` | `Qwen3.6-35B-A3B-MTP` | 模型名，需与 llama.cpp 启动时一致 |
 | `LLAMACPP_API_KEY` | （空） | 留空则**不发** `Authorization` 头；反代/中转要鉴权时才填 |
-| `ENABLE_THINKING` | `0` | `0`=关掉 Qwen3 深度思考（秒回，适配语音）；`1`=开启（慢但质量高） |
+| `ENABLE_THINKING` | `0` | 全局思考开关：`0`=关掉 Qwen3 深度思考（秒回，适配语音）；`1`=开启（慢但质量高） |
+
+### 13.1b 语音输入（ASR，浏览器 Web Speech）
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `VOICE_AUTOSTART` | `1` | `1`=打开页面即常开麦克风、识别到停顿自动发送（默认）；`0`=必须手动点麦克风 |
+| `VOICE_SILENCE_MS` | `1200` | 静音多久判定「说完了」并自动提交给大模型（毫秒） |
+| `VOICE_RESUME_DELAY_MS` | `400` | 播完后再等多久才重新开麦（毫秒）。留这段让喇叭余音/混响衰减，防回声自激；300~500 较稳 |
+| `ASR_LANG` | `zh-CN` | 识别语言 |
+
+三项随 `/api/asr/config` 下发给前端，改 `.env` 即可调交互，无需改前端代码。
+无论是语音还是打字，两条输入路径最终走同一个 `user_message` 链路（记忆、打断策略完全一致）。
+
+### 13.1c 视觉子系统（相机 → 识别 + 深度）
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `VISION_ENABLED` | `1` | 总开关；设 `0` 则完全不启动视觉 |
+| `VISION_CAMERA_MODE` | `auto` | `auto` / `single`（一个双目相机输出左右并排）/ `dual`（两个相机）/ `mono`（单目） |
+| `VISION_CAMERA_INDEX` | `0` | single / mono 用的相机索引 |
+| `VISION_LEFT_INDEX` / `VISION_RIGHT_INDEX` | `0` / `1` | dual 模式的两个相机 |
+| `VISION_WIDTH` / `VISION_HEIGHT` | `640` / `480` | 采集分辨率 |
+| `VISION_FOCAL_LENGTH` | `700.0` | 焦距（像素），**需按相机标定** |
+| `VISION_BASELINE` | `0.06` | 两镜头间距（米），**需按相机标定** |
+| `VISION_MIN_DISTANCE` / `VISION_MAX_DISTANCE` | `0.2` / `20.0` | 有效测距范围，超出判为无效 |
+| `VISION_YOLO_MODEL` | `yolov8n.pt` | 权重名，放 `backend/vision/weights/` |
+| `VISION_YOLO_CONF` | `0.4` | 检测置信度阈值 |
+| `VISION_YOLO_DEVICE` | `cpu` | 推理设备 |
+| `VISION_DETECT_EVERY_N` | `3` | 每 N 帧检测一次；中间帧用追踪器兜住（CPU 上保证画面流畅的关键） |
+| `VISION_MODEL_DIR` | （空） | 追加的权重搜索目录 |
+| `VISION_JPEG_QUALITY` | `70` | MJPEG 画质 |
+
+三个接口：`/api/vision/stream`（MJPEG 画面）、`/api/vision/objects`（物体快照）、
+`/api/vision/status`（状态）。**深度只来自双目视差**：单目时 `distance_m` 恒为 `null`，
+前端显示「—」而不假造距离；方位角单目也有意义（只依赖焦距与像素位置）。
+
+**深度来源按可用性自动选**，不需要手工切换：
+
+| 优先级 | 来源 | 变量 | 说明 |
+|---|---|---|---|
+| 1 | 结构光（Astra Pro） | `VISION_USE_ASTRA` / `VISION_ASTRA_SDK_DIR` | 真实物理测距 |
+| 2 | 双目视差 | `VISION_FOCAL_LENGTH` / `VISION_BASELINE` | `focal*baseline/disparity` |
+| 3 | 无 | —— | 单目降级，只出方位，距离为 `null` |
+
+**Orbbec Astra Pro 的实情（踩坑记录）**：它由两个 USB 设备组成，不是立体双目——
+`PID_0403` 是结构光深度（厂商私有接口），`PID_0501` 是 RGB（UVC）。
+所以 OpenCV 只能拿到 RGB 做识别，深度必须走 **Astra SDK 的 C API**
+（`backend/vision/astra.py`）。实测弯路：OpenNI2（含 SDK 自带 `orbbec.dll`）枚举到 0 个设备；
+`primesense` 在 Python 3.13 上 import 失败；而厂商的 `DepthReaderPoll.exe` 能出深度帧。
+
+两个工程细节：
+- **深度帧要复用**：Astra 是无阻塞读，两次深度帧之间去读会拿到 `None`，
+  照实透传会让距离一帧有一帧无地闪。复用最近一帧，但超过 `_DEPTH_STALE_S`(0.3s) 就丢弃。
+- **取深度用中位数**：结构光在边缘/反光处有少量野值，均值会被带偏；
+  且框中心单点常常正好是无效像素（实测中心 0mm），必须取邻域有效值的中位数。
+- RGB 与深度是**两个不同传感器**（分辨率/视场角不同），当前按归一化坐标映射，
+  够 demo 用；要更准需做深度-彩色对齐标定（SDK 有 `astra_depthstream_set_registration`）。
+
+> **完整的选型理由、模块职责、算法细节、排障记录与验证步骤见专题文档
+> `docs/vision-design.md`** —— 目标是「照该文可复现整套视觉逻辑」。本节只列配置与结论。
 ### 13.2 分句与语言
 | 变量 | 默认值 | 说明 |
 |---|---|---|
@@ -759,7 +888,7 @@ async def lifespan(app: FastAPI):
 | `ENABLE_TOOLS` | `1` | 总开关；`0` 则不调工具，走原有流式链路 |
 | `TOOL_MAX_ROUNDS` | `3` | 工具循环最多轮次，超过则强制进入「最终答」阶段，防无限调用 |
 | `TOOL_MAX_PERMISSION` | `read` | 可暴露给 LLM 的最高权限；可选 `read` / `write` / `dangerous`。`echo` 默认被 `dangerous` 阈门拦住，设为 `dangerous` 才会出现 |
-| `TAVILY_API_KEY` | 仓里硬编码 | 联网搜索；生产请搬到 .env |
+| `TAVILY_API_KEY` | （空） | 联网搜索；留空则 `web_search` 不可用，其余链路照常（从 `.env` 读取） |
 | `TAVILY_URL` | `https://api.tavily.com/search` | 搜索接口地址，一般不动 |
 
 ### 13.5 对话轮次策略（INTERRUPT_MODE）
@@ -850,7 +979,8 @@ async def lifespan(app: FastAPI):
 
 `server.py` 的 `_check_secrets()` 在加载完工具后运行，**只提示不阻断**：
 
-- `LLM_PROVIDER=ark` 且 `ARK_API_KEY` 为空 → 警告并提示可改用 `ollama`；
+- `LLM_PROVIDER=maas`（默认）且 `MAAS_API_KEY` 为空 → 警告并提示填 `.env` 或改用 `ark` / `ollama` / `llamacpp`；
+- `LLM_PROVIDER=ark` 且 `ARK_API_KEY` 为空 → 同上；
 - `TAVILY_API_KEY` 为空 → 提示 `web_search` 不可用（其余链路照常）。
 
 设计原则：缺密钥应该给出**人能读懂的一行提示**，而不是等到第一次对话时抛 401 堆栈。
@@ -897,9 +1027,9 @@ python backend\server.py
 
 | job | 做什么 | 能捕到的问题 |
 |---|---|---|
-| `python-syntax` | `compileall -q backend/ scripts/` + 工具 schema 自检 + 记忆模块自检 + 关键模块真实 `import` | 语法错、缩进错、编码错、循环引用、笔误的模块名、schema 与函数签名不一致、记忆层行为回退 |
+| `python-syntax` | `compileall -q backend/ scripts/` + 工具 schema 自检 + 记忆模块自检 + 表情/动作四处一致性 + 标记解析自检 + 视觉纯逻辑自检 + 关键模块真实 `import` | 语法错、缩进错、编码错、循环引用、笔误的模块名、schema 与函数签名不一致、记忆层行为回退、表情/动作名单漂移、标记被念出来/动作不触发 |
 | `secret-scan` | 跑 `scripts/check_no_hardcoded_secrets.py` | 密钥被硬编码回代码 |
-| `js-syntax` | `node --check` 校验自写前端模块（含 `profile_card.js`）| 前端 JS 语法错 |
+| `js-syntax` | `node --check` 校验自写前端模块（含 `asr.js` / `profile_card.js`）| 前端 JS 语法错 |
 
 `compileall` 之后额外做一次 `import config, pipeline.text_router, pipeline.turn_policy, tools`：
 编译通过只说明语法合法，真正 import 才能捕到循环引用与写错的模块路径。

@@ -31,6 +31,8 @@ SELF = Path(__file__).name
 VENDOR_PATTERNS = [
     ("Tavily API key", re.compile(r"tvly-[A-Za-z0-9_\-]{16,}")),
     ("OpenAI API key", re.compile(r"sk-[A-Za-z0-9]{20,}")),
+    # 阿里云百炼 / DashScope 风格：sk- 后可含点号与连字符，且带签名字段（如 sk-sp-H.xxx.MEYCIQ...）
+    ("Aliyun/DashScope API key", re.compile(r"sk-[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{16,}")),
     ("GitHub token", re.compile(r"gh[pousr]_[A-Za-z0-9]{30,}")),
 ]
 
@@ -49,6 +51,7 @@ SAFE_HINTS = (
     "your-",
     "YOUR_",
     "xxx",
+    "XXX",
     "<",
     "${",
 )

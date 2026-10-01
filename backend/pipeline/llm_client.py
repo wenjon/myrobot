@@ -1,6 +1,7 @@
-﻿"""LLM 流式客户端：支持火山引擎 Ark（OpenAI 兼容）与本地 Ollama。
+﻿"""LLM 流式客户端：支持阿里云百炼 MaaS / 火山引擎 Ark（均为 OpenAI 兼容）与本地 Ollama。
 
 由 config.LLM_PROVIDER 选择供应商：
+- "maas"   → 阿里云百炼 Model Studio，https://.../compatible-mode/v1/chat/completions（默认）
 - "ark"    → https://.../chat/completions（OpenAI 兼容 SSE，Bearer 鉴权）
 - "ollama" → 本地 /api/chat（NDJSON 流）
 
@@ -20,6 +21,10 @@ from config import (
     ARK_BASE_URL,
     ARK_API_KEY,
     ARK_MODEL,
+    MAAS_BASE_URL,
+    MAAS_API_KEY,
+    MAAS_MODEL,
+    MAAS_ENABLE_THINKING,
     LLAMACPP_URL,
     LLAMACPP_MODEL,
     LLAMACPP_API_KEY,
@@ -30,10 +35,77 @@ _TIMEOUT = httpx.Timeout(180.0, connect=10.0)
 
 
 # =====================================================================
-# 火山引擎 Ark（OpenAI 兼容）
+# 阿里云百炼 MaaS（OpenAI 兼容）
 # =====================================================================
-def _ark_headers() -> Dict[str, str]:
-    return {"Authorization": f"Bearer {ARK_API_KEY}", "Content-Type": "application/json"}
+# 与 Ark 完全同构（同一套 OpenAI 协议），只是 base_url / key / model 不同。
+# 抽取成一个共用实现，避免两处重复维护 SSE 解析逻辑。
+def _maas_headers() -> Dict[str, str]:
+    return {"Authorization": f"Bearer {MAAS_API_KEY}", "Content-Type": "application/json"}
+
+
+def _maas_payload(messages: List[Dict], *, stream: bool, temperature: float,
+                  tools: List[Dict] | None = None) -> Dict:
+    payload: Dict = {
+        "model": MAAS_MODEL,
+        "messages": messages,
+        "stream": stream,
+        "temperature": temperature,
+    }
+    if tools is not None:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+    if not MAAS_ENABLE_THINKING:
+        # Qwen3 系在百炼端默认可能带思考过程，会先吐一大段 reasoning_content；
+        # 语音对话要秒级开口，显式关闭（与 llama.cpp 的 enable_thinking 同理）。
+        payload["enable_thinking"] = False
+    return payload
+
+
+async def _maas_stream(messages: List[Dict[str, str]], temperature: float) -> AsyncIterator[str]:
+    url = f"{MAAS_BASE_URL}/chat/completions"
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        async with client.stream("POST", url, headers=_maas_headers(),
+                                 json=_maas_payload(messages, stream=True, temperature=temperature)) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line or not line.startswith("data:"):
+                    continue
+                data_str = line[len("data:"):].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    data = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
+                choices = data.get("choices") or []
+                if not choices:
+                    continue
+                # 只取正式回答 content，忽略 reasoning_content（思维链）
+                delta = choices[0].get("delta", {}) or {}
+                chunk = delta.get("content") or ""
+                if chunk:
+                    yield chunk
+
+
+async def _maas_once(messages: List[Dict[str, str]], temperature: float) -> str:
+    url = f"{MAAS_BASE_URL}/chat/completions"
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        resp = await client.post(url, headers=_maas_headers(),
+                                 json=_maas_payload(messages, stream=False, temperature=temperature))
+        resp.raise_for_status()
+        data = resp.json()
+        return (data["choices"][0]["message"].get("content") or "").strip()
+
+
+async def _maas_with_tools(messages, tools, temperature):
+    url = f"{MAAS_BASE_URL}/chat/completions"
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        resp = await client.post(url, headers=_maas_headers(),
+                                 json=_maas_payload(messages, stream=False,
+                                                    temperature=temperature, tools=tools))
+        resp.raise_for_status()
+        data = resp.json()
+    return _normalize_toolcalls(data["choices"][0]["message"])
 
 
 async def _ark_stream(messages: List[Dict[str, str]], temperature: float) -> AsyncIterator[str]:
@@ -216,7 +288,10 @@ async def _llamacpp_with_tools(messages, tools, temperature):
 # 统一入口
 # =====================================================================
 async def stream_chat(messages: List[Dict[str, str]], temperature: float = 0.7) -> AsyncIterator[str]:
-    if LLM_PROVIDER == "ark":
+    if LLM_PROVIDER == "maas":
+        async for tok in _maas_stream(messages, temperature):
+            yield tok
+    elif LLM_PROVIDER == "ark":
         async for tok in _ark_stream(messages, temperature):
             yield tok
     elif LLM_PROVIDER == "llamacpp":
@@ -238,6 +313,8 @@ async def chat_with_tools(messages: List[Dict], tools: List[Dict],
     返回: {"content": str, "tool_calls": [{"id","name","arguments"(dict)}...]}
     tool_calls 为空表示 LLM 选择直接回答（不调用工具）。
     """
+    if LLM_PROVIDER == "maas":
+        return await _maas_with_tools(messages, tools, temperature)
     if LLM_PROVIDER == "ark":
         return await _ark_with_tools(messages, tools, temperature)
     if LLM_PROVIDER == "llamacpp":
@@ -247,6 +324,8 @@ async def chat_with_tools(messages: List[Dict], tools: List[Dict],
 
 
 async def chat_once(messages: List[Dict[str, str]], temperature: float = 0.3) -> str:
+    if LLM_PROVIDER == "maas":
+        return await _maas_once(messages, temperature)
     if LLM_PROVIDER == "ark":
         return await _ark_once(messages, temperature)
     if LLM_PROVIDER == "llamacpp":

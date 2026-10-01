@@ -22,3 +22,8 @@ context.log
 *_files/
 # 候选头像素材（可从 RPM / VRM 等渠道下载，不入库）
 avatar_candidates/
+# YOLO 权重（.pt 是二进制模型，几 MB 起，不入库；
+# 放到 backend/vision/weights/ 即可，缺失时见 backend/vision/detector.py 的解析顺序）
+backend/vision/weights/
+# Claude Code 本机权限记录（含机器专有绝对路径，只对当前机器有意义）
+.claude/settings.local.json

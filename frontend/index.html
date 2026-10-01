@@ -24,6 +24,8 @@
   button:disabled { opacity: 0.4; cursor: default; }
   #interrupt { background: #7a3a3a; }
   #mic { background: #3a7a5a; }
+  #mic.on { background: #2fa06a; box-shadow: 0 0 0 2px rgba(47,160,106,.35); }
+  .voice-hint { font-size: 12px; color: #7a8296; min-height: 16px; line-height: 1.4; }
   #status.ok { color: #6fcf97; }
   #status.bad { color: #eb5757; }
   .expr-row { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -44,6 +46,41 @@
   .pc-actions button { padding: 4px 12px; font-size: 12px; }
   .pc-yes { background: #3a6a4a; }
   .pc-no { background: #4a4a55; }
+
+  /* ---- 视觉浮层（左下角）：相机实时画面 + 识别 + 深度/方位 ---- */
+  #visionPanel {
+    position: absolute; left: 12px; bottom: 12px; width: 232px;
+    background: rgba(14,18,28,.86); border: 1px solid #26304a; border-radius: 10px;
+    font-size: 12px; color: #cfd6e6; overflow: hidden; z-index: 10;
+    backdrop-filter: blur(4px); box-shadow: 0 6px 22px rgba(0,0,0,.45);
+  }
+  #visionPanel.collapsed { width: auto; }
+  #visionPanel.collapsed .vp-body { display: none; }
+  .vp-head { display: flex; align-items: center; gap: 6px; padding: 7px 9px; cursor: pointer;
+             background: rgba(37,48,72,.65); user-select: none; }
+  .vp-title { flex: 1; font-weight: 600; color: #9fb0d0; }
+  .vp-dot { width: 7px; height: 7px; border-radius: 50%; background: #6b7280; flex: none; }
+  .vp-dot.live { background: #2fa06a; box-shadow: 0 0 6px #2fa06a; }
+  .vp-dot.err { background: #eb5757; }
+  .vp-dot.warn { background: #e0c56a; }
+  .vp-toggle { color: #7a8296; font-size: 11px; }
+  .vp-body { padding: 8px 9px 9px; }
+  .vp-video { width: 100%; border-radius: 6px; background: #0a0d16; display: block;
+              aspect-ratio: 4 / 3; object-fit: cover; }
+  .vp-meta { margin-top: 6px; color: #7a8296; font-size: 11px; line-height: 1.5; }
+  .vp-objs { margin-top: 6px; max-height: 132px; overflow-y: auto;
+             display: flex; flex-direction: column; gap: 4px; }
+  .vp-obj { display: flex; align-items: baseline; gap: 6px; padding: 3px 5px;
+            background: #171d2c; border-radius: 5px; line-height: 1.4; }
+  .vp-obj-id { color: #6b7a99; font-size: 10px; flex: none; }
+  .vp-obj-type { color: #dfe6f5; font-weight: 600; flex: 1;
+                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .vp-obj-dist { color: #6fcf97; flex: none; }
+  .vp-obj-dist.unknown { color: #6b7a99; }
+  .vp-obj-dir { color: #9fb0d0; flex: none; font-size: 11px; }
+  .vp-empty { color: #5d6678; padding: 3px 2px; }
+  /* 画面占满时（窄屏）浮层缩得更小，避免挡住数字人 */
+  @media (max-width: 760px) { #visionPanel { width: 168px; } .vp-objs { max-height: 88px; } }
 </style>
 <script type="importmap">
 {
@@ -55,7 +92,24 @@
 </head>
 <body>
   <div id="left">
-    <div id="wrap"><canvas id="face"></canvas></div>
+    <div id="wrap">
+      <canvas id="face"></canvas>
+
+      <!-- 视觉浮层（左下角）：相机实时画面 + 物体识别 + 深度/方位。
+           默认常开，点标题栏可折叠成一个小条。内容由 src/vision.js 填充。 -->
+      <div id="visionPanel">
+        <div class="vp-head" id="visionHead">
+          <span class="vp-dot" id="visionDot"></span>
+          <span class="vp-title">视觉</span>
+          <span class="vp-toggle" id="visionToggle">收起</span>
+        </div>
+        <div class="vp-body" id="visionBody">
+          <img class="vp-video" id="visionVideo" alt="相机画面" />
+          <div class="vp-meta" id="visionMeta">初始化…</div>
+          <div class="vp-objs" id="visionObjs"></div>
+        </div>
+      </div>
+    </div>
     <div class="sub" style="padding:8px;">全链路流式：LLM（Ark / llama.cpp / Ollama 三选一）+ 工具调用（联网搜索）→ 记忆（滑动窗口 + 摘要 + 用户画像）→ 中央调度（分句 + 表情推送）→ Web Speech TTS → Three.js 3D 数字人 viseme 口型 / 表情</div>
   </div>
   <div id="right">
@@ -68,8 +122,9 @@
     <div id="profileCards"></div>
     <div class="expr-row" id="exprTest"></div>
     <div class="row">
-      <textarea id="input" placeholder="输入中文对话，回车发送…"></textarea>
+      <textarea id="input" placeholder="也可以直接打字，回车发送…"></textarea>
     </div>
+    <div class="voice-hint" id="voiceHint"></div>
     <div class="row">
       <button id="send">发送</button>
       <button id="mic">🎤 语音</button>

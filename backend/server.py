@@ -19,14 +19,15 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 
 from config import (
-    HOST, PORT, LLM_PROVIDER, OLLAMA_MODEL, ARK_MODEL, LOG_CONTEXT, CONTEXT_LOG_FILE,
+    HOST, PORT, LLM_PROVIDER, OLLAMA_MODEL, ARK_MODEL, MAAS_MODEL, LOG_CONTEXT, CONTEXT_LOG_FILE,
     SHOW_REAL_IP, INTERRUPT_MODE,
     TTS_ENGINE, TTS_VOICE, TTS_RATE, TTS_PITCH, TTS_VOLUME, TTS_PROSODY,
+    VOICE_AUTOSTART, VOICE_SILENCE_MS, VOICE_RESUME_DELAY_MS, ASR_LANG,
 )
 from pipeline.llm_client import stream_chat, chat_once
 from pipeline.text_router import route
@@ -47,6 +48,80 @@ from server_app.notify import notify_interrupted as _notify_interrupted
 from server_app.notify import send_json as _send_json
 from server_app.peers import format_peer
 
+
+# =====================================================================
+# 视觉子系统（可选）：双目/单目相机 → 识别 + 深度 → 前端左下角浮层
+# =====================================================================
+# 刻意做成「尽力而为」：依赖缺失、相机被占用、模型加载失败都只记一条日志，
+# 绝不让它阻断 myrobot 的对话链路——视觉是附加能力，不是启动前提。
+_vision = None
+_vision_status = "disabled"
+
+
+def _vision_config() -> dict:
+    """把扁平的环境变量拼成 VisionDev 风格的嵌套配置。"""
+    from config import (
+        VISION_CAMERA_MODE, VISION_CAMERA_INDEX, VISION_LEFT_INDEX, VISION_RIGHT_INDEX,
+        VISION_WIDTH, VISION_HEIGHT, VISION_FOCAL_LENGTH, VISION_BASELINE,
+        VISION_MIN_DISTANCE, VISION_MAX_DISTANCE, VISION_YOLO_MODEL, VISION_YOLO_CONF,
+        VISION_YOLO_DEVICE, VISION_DETECT_EVERY_N, VISION_JPEG_QUALITY,
+        VISION_USE_ASTRA, VISION_ASTRA_SDK_DIR,
+    )
+    return {
+        "camera": {"mode": VISION_CAMERA_MODE, "single_index": VISION_CAMERA_INDEX,
+                   "left_index": VISION_LEFT_INDEX, "right_index": VISION_RIGHT_INDEX,
+                   "width": VISION_WIDTH, "height": VISION_HEIGHT, "backend": "default"},
+        "stereo": {"focal_length": VISION_FOCAL_LENGTH, "baseline": VISION_BASELINE,
+                   "min_distance": VISION_MIN_DISTANCE, "max_distance": VISION_MAX_DISTANCE},
+        "yolo": {"model": VISION_YOLO_MODEL, "conf_threshold": VISION_YOLO_CONF,
+                 "device": VISION_YOLO_DEVICE, "detect_every_n_frames": VISION_DETECT_EVERY_N},
+        "server": {"jpeg_quality": VISION_JPEG_QUALITY},
+        # 结构光深度（Orbbec Astra Pro）：sdk_dir 为空则不用，退回单目方位
+        "astra": {"enabled": VISION_USE_ASTRA, "sdk_dir": VISION_ASTRA_SDK_DIR},
+    }
+
+
+def _start_vision() -> None:
+    global _vision, _vision_status
+    from config import VISION_ENABLED
+
+    if not VISION_ENABLED:
+        _vision_status = "disabled"
+        _emit("[视觉] VISION_ENABLED=0，视觉子系统未启动。")
+        return
+    try:
+        from vision import VisionPipeline, vision_available
+    except Exception as e:  # noqa: BLE001
+        _vision_status = f"import-failed: {e}"
+        _emit(f"[视觉][警告] 视觉模块导入失败，已关闭视觉功能：{e}")
+        return
+
+    ok, why = vision_available()
+    if not ok:
+        _vision_status = f"unavailable: {why}"
+        _emit(f"[视觉][提示] {why}；视觉浮层将显示不可用，对话不受影响。")
+        return
+
+    try:
+        _vision = VisionPipeline(_vision_config())
+        _vision.start()          # 后台守护线程；相机打开失败会在 status 里体现
+        _vision_status = "starting"
+        _emit("[视觉] 视觉管线已启动（相机/模型加载在后台进行）。")
+    except Exception as e:  # noqa: BLE001
+        _vision = None
+        _vision_status = f"start-failed: {e}"
+        _emit(f"[视觉][警告] 视觉管线启动失败，已关闭视觉功能：{e}")
+
+
+def _stop_vision() -> None:
+    global _vision
+    if _vision is not None:
+        try:
+            _vision.stop()
+        except Exception:
+            pass
+        _vision = None
+
 # ---------------------------------------------------------------------
 # 应用生命周期（lifespan）：启动时初始化工具、关闭时释放资源。
 # 这是 FastAPI 新推荐的写法，取代已弱化的 @app.on_event("startup"/"shutdown")。
@@ -56,11 +131,13 @@ from server_app.peers import format_peer
 # ---------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # ---- startup 阶段：预留扩展点（如初始化定时任务 / 预热连接池等） ----
+    # ---- startup 阶段：启动视觉管线（可选，失败不影响对话） ----
+    _start_vision()
     try:
         yield
     finally:
         # ---- shutdown 阶段：释放工具占用的共享资源（HTTP client / 未来的 DB 连接池 / 串口句柄） ----
+        _stop_vision()
         await REGISTRY.teardown_all()
         await RESOURCES.aclose()
 
@@ -92,13 +169,17 @@ def _check_secrets() -> None:
     """启动自检：密钥已从代码中移除，换机器后必须自己填 .env。
 
     只做提示不阻断启动：没有 Tavily key 也能聊天，只是不能联网搜索；
-    没有 Ark key 则可以把 LLM_PROVIDER 改成 ollama 跑本地模型。
+    没有云端 key 则可以把 LLM_PROVIDER 改成 ollama / llamacpp 跑本地模型。
     """
-    from config import ARK_API_KEY, TAVILY_API_KEY
+    from config import ARK_API_KEY, MAAS_API_KEY, TAVILY_API_KEY
 
+    if LLM_PROVIDER == "maas" and not MAAS_API_KEY:
+        _emit("[启动][警告] LLM_PROVIDER=maas 但 MAAS_API_KEY 为空："
+              "请将 .env.example 复制为 .env 并填入 MAAS_API_KEY，"
+              "或改用 LLM_PROVIDER=ark / ollama / llamacpp。")
     if LLM_PROVIDER == "ark" and not ARK_API_KEY:
         _emit("[启动][警告] LLM_PROVIDER=ark 但 ARK_API_KEY 为空："
-              "请将 .env.example 复制为 .env 并填入密钥，或改用 LLM_PROVIDER=ollama / llamacpp。")
+              "请将 .env.example 复制为 .env 并填入密钥，或改用 LLM_PROVIDER=maas / ollama / llamacpp。")
     if not TAVILY_API_KEY:
         _emit("[启动][提示] TAVILY_API_KEY 未配置，web_search 联网搜索将不可用。")
 
@@ -126,13 +207,80 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    """健康检查：确认服务在线并回报当前使用的模型名与 TTS 配置。"""
-    model = ARK_MODEL if LLM_PROVIDER == "ark" else OLLAMA_MODEL
+    """健康检查：确认服务在线并回报当前使用的模型名与 TTS / ASR 配置。"""
+    model = {"maas": MAAS_MODEL, "ark": ARK_MODEL}.get(LLM_PROVIDER, OLLAMA_MODEL)
     return {
         "ok": True, "provider": LLM_PROVIDER, "model": model,
         "tts": {"engine": TTS_ENGINE, "voice": TTS_VOICE, "prosody": TTS_PROSODY,
                 "rate": TTS_RATE, "pitch": TTS_PITCH},
+        "asr": {"autostart": VOICE_AUTOSTART, "silence_ms": VOICE_SILENCE_MS,
+                "resume_delay_ms": VOICE_RESUME_DELAY_MS, "lang": ASR_LANG},
     }
+
+
+@app.get("/api/asr/config")
+async def asr_config():
+    """前端启动时拉一次：决定是否默认常开麦克风、静音多久自动提交。
+
+    放在服务端下发（而非前端写死）是为了让 .env 就能改交互行为，
+    不用改前端代码就能调「自动监听 / 安静阈值」。
+    """
+    return {"autostart": VOICE_AUTOSTART, "silence_ms": VOICE_SILENCE_MS,
+            "resume_delay_ms": VOICE_RESUME_DELAY_MS, "lang": ASR_LANG}
+
+
+# =====================================================================
+# 视觉：状态 / 物体数据 / 实时画面（MJPEG）
+# =====================================================================
+@app.get("/api/vision/status")
+async def vision_status():
+    """视觉子系统状态。前端据此决定是否渲染浮层、提示什么文案。"""
+    if _vision is None:
+        return {"ok": True, "available": False, "status": _vision_status, "depth": False}
+    snap = _vision.snapshot()
+    snap.update({"ok": True, "available": True})
+    return snap
+
+
+@app.get("/api/vision/objects")
+async def vision_objects():
+    """最新一帧的物体快照（识别 + 方位 + 深度）。前端每 ~500ms 轮询一次。"""
+    if _vision is None:
+        return {"ok": True, "available": False, "objects": []}
+    ev = _vision.get_latest_event()
+    ev["ok"] = True
+    ev["available"] = True
+    return ev
+
+
+@app.get("/api/vision/stream")
+async def vision_stream():
+    """标注后的实时画面，MJPEG 流（multipart/x-mixed-replace）。
+
+    为什么用 MJPEG 而不是 WebSocket：浏览器 <img src> 直接就能显示，
+    前端零解码代码；而且画面与 /api/vision/objects 的 JSON 数据解耦，
+    两者各自独立刷新（画面要流畅、物体列表不需要那么快）。
+    """
+    if _vision is None:
+        raise HTTPException(status_code=503, detail="视觉子系统未启用")
+
+    async def frames():
+        last_id = -1
+        try:
+            while True:
+                jpeg = _vision.get_latest_jpeg()
+                fid = _vision.frame_id
+                # 只在有新帧时才推，避免同一张图反复发（省带宽）
+                if jpeg is not None and fid != last_id:
+                    last_id = fid
+                    yield (b"--frame\r\nContent-Type: image/jpeg\r\n"
+                           b"Content-Length: " + str(len(jpeg)).encode() + b"\r\n\r\n"
+                           + jpeg + b"\r\n")
+                await asyncio.sleep(0.05)
+        except asyncio.CancelledError:
+            return
+
+    return StreamingResponse(frames(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 
 # =====================================================================

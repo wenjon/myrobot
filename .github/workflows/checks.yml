@@ -45,13 +45,31 @@ jobs:
         # 自检内部把 MEMORY_DATA_DIR 指到临时目录，不会碰真实记忆。
         run: python scripts/check_memory.py
 
+      - name: 表情/动作四处一致性
+        # 表情/动作名散落在 head3d.js(EXPR/OVERLAYS)、main.js(EMOTION_SET/ACTION_MAP)、
+        # config.py(SYSTEM_PROMPT) 与 text_router.py(简写标记识别) 四处，任一处漏改，
+        # 模型给的标记就会被降级丢弃、或（简写标记）被当成正文念出来。
+        # 纯静态：只读文本 + 解析 avatar.glb，不请求 LLM、不需密钥。
+        run: python scripts/check_expressions.py
+
+      - name: 中央调度标记解析自检
+        # 大模型不照 prompt 写 [表情:开心]，实测会写 [歪头:歪头]/[眨眼:眨眼]，
+        # 老解析只认 4 个类型词，导致动作不触发、标记还被念出来。
+        # 这里把真实日志字符串固化成用例。纯静态，不请求 LLM。
+        run: python scripts/check_text_router.py
+
+      - name: 视觉子系统纯逻辑自检
+        # 管线本体要相机 + cv2 + YOLO 权重，进不了 CI；这里只测不依赖 cv2 的
+        # 纯逻辑：tracker 的 id 稳定性、类名中文化、权重路径解析。
+        run: python scripts/check_vision.py
+
       - name: 关键模块可导入自检
         # 比 compileall 更进一步：真正 import 一次，能捕到循环引用 / 笔误的模块名。
         # 不导入 server.py（它会初始化日志与工具，属于运行时行为）。
         working-directory: backend
         run: |
           pip install -q -r requirements.txt
-          python -c "import config, pipeline.text_router, pipeline.turn_policy, tools; print('imports ok')"
+          python -c "import config, pipeline.text_router, pipeline.turn_policy, tools, vision; print('imports ok')"
 
   # ------------------------------------------------------------------
   # Job 2: 密钥硬编码扫描
@@ -91,7 +109,7 @@ jobs:
         # 是直接 vendored 的三方库，不归我们维护，排除。
         # --check 只验语法，不执行（这些文件依赖浏览器 API，在 node 里跑不起来）。
         run: |
-          for f in frontend/src/main.js frontend/src/ws.js frontend/src/tts.js frontend/src/viseme.js frontend/src/head3d.js frontend/src/profile_card.js; do
+          for f in frontend/src/main.js frontend/src/ws.js frontend/src/tts.js frontend/src/viseme.js frontend/src/head3d.js frontend/src/profile_card.js frontend/src/asr.js frontend/src/vision.js; do
             echo "checking $f"
             node --check "$f"
           done
