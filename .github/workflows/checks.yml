@@ -62,6 +62,10 @@ jobs:
         # 管线本体要相机 + cv2 + YOLO 权重，进不了 CI；这里只测不依赖 cv2 的
         # 纯逻辑：tracker 的 id 稳定性、类名中文化、权重路径解析。
         run: python scripts/check_vision.py
+      - name: 声源测向（DOA）自检
+        # 麦克风阵列测向：用合成声源验证 GCC-PHAT 方位反解、能量门限与 TTS 冻结。
+        # 纯离线：不请求 LLM、不需要阵列、不需 Key（docs/doa-gaze-design.md）。
+        run: python scripts/check_doa.py
 
       - name: 关键模块可导入自检
         # 比 compileall 更进一步：真正 import 一次，能捕到循环引用 / 笔误的模块名。

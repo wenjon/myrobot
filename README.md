@@ -253,6 +253,7 @@ python backend\server.py
 | 上下文 token 成本 | 22 |
 
 ## 目录
+- `docs/doa-gaze-design.md` — 麦克风阵列声源测向（DOA）→ 数字人注视转向
 - `docs/superpowers/specs/` — 设计规格（superpowers 流程产出）
 - `scripts/` — 静态自检：密钥扫描 / 工具 Schema / 记忆模块
 - `backend/` — FastAPI + WebSocket 流式后端

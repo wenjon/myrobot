@@ -5,6 +5,7 @@ import { speak, cancel, softStop, ttsReady, currentEngine, currentVoice, setVoic
 import { visemeForChar, CLOSED } from './viseme.js';
 import { createProfileCards } from './profile_card.js';
 import { createASR } from './asr.js';
+import { createDOA } from './doa.js';
 import { initVision } from './vision.js';
 
 const canvas = document.getElementById('face');
@@ -28,6 +29,7 @@ let asr = null;
 // 数字人在后台异步加载，不阻塞 WebSocket 连接与聊天。
 // （手机上 glb 较大/WebGL 慢时，之前的 await 会卡住后续连接代码，导致发不出消息。）
 let head = null;
+const doa = createDOA(() => head);
 statusEl.textContent = '连接中…';
 createHead3D(canvas, './src/avatar.glb')
   .then((h) => { head = h; buildDebugPanel(h); console.log('[Head] 数字人加载完成'); })
@@ -165,6 +167,9 @@ const ws = connect(WS_URL, {
     } else if (msg.type === 'profile_conflict') {
       // 服务端提炼出的画像变更与旧值冲突，弹卡让用户拍板（docs § 16.8）
       profileCards.show(msg);
+    } else if (msg.type === 'doa_azimuth') {
+      // 声源方向广播：让数字人看向说话人（docs/doa-gaze-design.md §8）
+      if (head) doa.feed(msg);
     } else if (msg.type === 'profile_resolved') {
       profileCards.resolved(msg);
     } else if (msg.type === 'cleared') {

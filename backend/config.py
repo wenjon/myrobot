@@ -212,6 +212,23 @@ VISION_FOCAL_LENGTH = float(os.getenv("VISION_FOCAL_LENGTH", "700.0"))
 VISION_BASELINE = float(os.getenv("VISION_BASELINE", "0.06"))         # 两镜头间距（米）
 VISION_MIN_DISTANCE = float(os.getenv("VISION_MIN_DISTANCE", "0.2"))
 VISION_MAX_DISTANCE = float(os.getenv("VISION_MAX_DISTANCE", "20.0"))
+
+
+# ---- 声源测向 DOA（麦克风阵列 → 数字人注视转向，docs/doa-gaze-design.md）----
+# 纯 Python GCC-PHAT：离片验证用 AzimuthSweepSource 合成声源；真机后续接 sounddevice。
+DOA_ENABLED    = os.getenv("DOA_ENABLED", "1") == "1"      # 总开关，默认开
+DOA_SOURCE     = os.getenv("DOA_SOURCE", "sweep")           # sweep(离片合成) | sounddevice(真机)
+DOA_FS         = int(os.getenv("DOA_FS", "48000"))          # 采样率：48k 时 70mm 基线全幅可达，16k 只到±63°
+DOA_FRAME_MS   = int(os.getenv("DOA_FRAME_MS", "100"))      # 帧长(毫秒)
+DOA_HOP_MS     = int(os.getenv("DOA_HOP_MS", "50"))         # 帧步进(毫秒)，50% 叠窗
+DOA_ACTIVE_DB  = float(os.getenv("DOA_ACTIVE_DB", "-30"))   # 能量门限(dBFS)：低于则不更新方向
+DOA_SMOOTH     = float(os.getenv("DOA_SMOOTH", "0.5"))      # 时域去抖系数(0.1..0.9)
+DOA_PUSH_HZ    = float(os.getenv("DOA_PUSH_HZ", "5"))       # 推给前端的频率上限(Hz)
+DOA_TTS_FREEZE = os.getenv("DOA_TTS_FREEZE", "1") == "1"    # 自己 TTS 播放时不转（回声抑制）
+DOA_FOV_X      = float(os.getenv("DOA_FOV_X", "70"))        # 屏幕水平视野(度)，用于 az→x 映射
+DOA_FOV_Y      = float(os.getenv("DOA_FOV_Y", "40"))        # 屏幕垂直视野(度)，用于 el→y 映射
+
+# ---- 视觉子系统（双目/单目相机 → 识别 + 深度，前端左下角浮层）----
 # YOLO 检测：模型名、置信度阈值、设备、每 N 帧检测一次。
 # CPU 上检测较慢，隔帧检测 + 追踪器兜住中间帧，是保证画面流畅的关键。
 # 权重解析顺序见 vision/detector.py::resolve_weights：仓库内 backend/vision/weights/

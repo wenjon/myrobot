@@ -28,10 +28,12 @@ from config import (
     SHOW_REAL_IP, INTERRUPT_MODE,
     TTS_ENGINE, TTS_VOICE, TTS_RATE, TTS_PITCH, TTS_VOLUME, TTS_PROSODY,
     VOICE_AUTOSTART, VOICE_SILENCE_MS, VOICE_RESUME_DELAY_MS, ASR_LANG,
+    DOA_PUSH_HZ,
 )
 from pipeline.llm_client import stream_chat, chat_once
 from pipeline.text_router import route
 from pipeline.conversation import conversations
+from doa.service import doa_service   # 声源测向（麦克风阵列 → 数字人注视）
 from pipeline.agent import agent_stream
 from pipeline.turn_policy import classify_incoming
 from pipeline.tts_edge import TTSUnavailable, list_voices, synthesize
@@ -131,12 +133,15 @@ def _stop_vision() -> None:
 # ---------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # ---- startup 阶段：启动视觉管线（可选，失败不影响对话） ----
+    # ---- startup 阶段：启动视觉管线 + 声源测向（都是可选，失败不影响对话） ----
+    doa_service.set_logger(_emit)
+    doa_service.start()
     _start_vision()
     try:
         yield
     finally:
         # ---- shutdown 阶段：释放工具占用的共享资源（HTTP client / 未来的 DB 连接池 / 串口句柄） ----
+        doa_service.stop()
         _stop_vision()
         await REGISTRY.teardown_all()
         await RESOURCES.aclose()
@@ -232,6 +237,14 @@ async def asr_config():
 # =====================================================================
 # 视觉：状态 / 物体数据 / 实时画面（MJPEG）
 # =====================================================================
+
+
+@app.get("/api/doa/snapshot")
+def doa_snapshot():
+    """读回 DOA 最新快照。先于 WS 广播：浏览器刷新或重连时能立即拿到当前朝向，
+    不至于等下一次广播（最多 ~200ms）才转过来。"""
+    return doa_service.snapshot()
+
 @app.get("/api/vision/status")
 async def vision_status():
     """视觉子系统状态。前端据此决定是否渲染浮层、提示什么文案。"""
@@ -361,6 +374,34 @@ async def ws_endpoint(ws: WebSocket):
     queue: asyncio.Queue = asyncio.Queue()  # 待处理的用户消息队列
     worker_current = {"cancel": None}    # 记录「当前正在处理的那轮」的打断信号
 
+    # ---- 声源方向广播：低频（push_hz）把最新方位角推给本连接 ----------------
+    # 与对话队列（worker）完全解耦：DOA 是“环境感知”旁路，不排队、不被对话打断。
+    # 读全局 doa_service 快照（后台线程更新），这里只做“读快照 + 节流下发”。
+    async def doa_broadcaster():
+        import asyncio
+        last_seq = -1
+        period = 1.0 / max(0.5, float(DOA_PUSH_HZ))
+        try:
+            while True:
+                snap = doa_service.snapshot()
+                if snap.get("seq", -1) != last_seq:
+                    last_seq = snap.get("seq", -1)
+                    try:
+                        await _send_json(ws, {
+                            "type": "doa_azimuth",
+                            "az": round(float(snap.get("az", 0.0)), 1),
+                            "active": bool(snap.get("active", False)),
+                            "status": snap.get("status", "init"),
+                            "ts": snap.get("ts", 0),
+                        })
+                    except Exception:
+                        pass
+                await asyncio.sleep(period)
+        except asyncio.CancelledError:
+            return
+
+    doa_task = None
+
     async def worker():
         """后台协程：串行地从队列取消息并处理。
 
@@ -377,7 +418,12 @@ async def ws_endpoint(ws: WebSocket):
             worker_current["cancel"] = c  # 暴露给外层，供 interrupt/clear 触发
             try:
                 who = f"#{conn_id} {peer}"
-                await _run_dialog(ws, session, text, c, who)
+                # DOA 回声抑制：自己播报期间不让数字人被自己的声音带得乱转
+                doa_service.note_tts_active(True)
+                try:
+                    await _run_dialog(ws, session, text, c, who)
+                finally:
+                    doa_service.note_tts_active(False)
             except Exception:
                 session.rollback_turn()
             finally:
@@ -422,6 +468,8 @@ async def ws_endpoint(ws: WebSocket):
                 _emit(f"[WS #{conn_id}] 绑定会话 {sid[:8]}（客户端提供旧会话: {had}）")
                 await ws.send_text(json.dumps({"type": "session", "session": sid}, ensure_ascii=False))
                 worker_task = asyncio.create_task(worker())
+                if doa_task is None:
+                    doa_task = asyncio.create_task(doa_broadcaster())
                 continue
 
             # ---- 打断：中止当前这轮 + 清空排队 ----
@@ -508,6 +556,8 @@ async def ws_endpoint(ws: WebSocket):
         # 前端断开：走 finally 收尾
         pass
     finally:
+        if doa_task is not None:
+            doa_task.cancel()
         # 优雅关闭：中止当前轮，投递停止哨兵，等 worker 退出（超时则强制取消）
         c = worker_current.get("cancel")
         if c:
