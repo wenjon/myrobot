@@ -1704,6 +1704,20 @@ Edge 返回的是 **MPEG-2 Layer III / 24kHz / 48kbps / 单声道**裸流
 - 想更「播音」可加大 `prosody.py` 里首末段的 pitch 差与停顿值；
   想更自然就用 `TTS_PROSODY=natural`。
 
+### 18.7 自定义音色（P0 已落地）
+
+上面 18.1~18.6 描述的是 **Edge 预设音色** 的现状：音色只能从微软清单里挑。
+「用自己选定的音色（含克隆本人声音）」是另一条能力线，完整设计见
+`docs/tts-voice-design.md`，要点：
+
+- 合成能力抽成 provider（`edge` / `cosyvoice` / `cloud`），按 `TTS_PROVIDER_ORDER` 降级；
+- 音色抽成本地注册表 `voices/<id>/`（`meta.json` + `ref.wav`，参考音频不入库）；
+- 本地首选 CosyVoice 2 零样本克隆，AMD 显卡先走 CPU，云端复刻作兜底；
+- `/api/tts` 返回结构不变，前端 `tts.js` 无需改动；流式 PCM（L2）放在 P2。
+
+**当前状态**：P0 已实现 provider 抽象与本地音色注册表（`backend/tts/`），
+`/api/tts` 返回契约不变，前端零改动；CosyVoice HTTP 适配与流式输出分别属于 P1/P2。
+
 
 
 ---

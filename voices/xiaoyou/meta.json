@@ -1,0 +1,9 @@
+{
+  "display_name": "小柚",
+  "source": "edge",
+  "locale": "zh-CN",
+  "gender": "Female",
+  "edge_voice": "zh-CN-XiaoyiNeural",
+  "license": "Microsoft Edge TTS 预设音色",
+  "tags": ["温柔", "日常"]
+}

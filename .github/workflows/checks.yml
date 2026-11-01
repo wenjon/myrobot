@@ -75,6 +75,11 @@ jobs:
           pip install -q -r requirements.txt
           python -c "import config, pipeline.text_router, pipeline.turn_policy, tools, vision; print('imports ok')"
 
+      - name: TTS provider / 音色注册表自检
+        # 覆盖 mp3 帧解析、韵律规划、音色注册表、降级链与返回契约。
+        # 在线 Edge 合成失败只记 warning，断网不会让 CI 变红。
+        run: python scripts/check_tts.py
+
   # ------------------------------------------------------------------
   # Job 2: 密钥硬编码扫描
   # ------------------------------------------------------------------

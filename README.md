@@ -254,7 +254,9 @@ python backend\server.py
 
 ## 目录
 - `docs/doa-gaze-design.md` — 麦克风阵列声源测向（DOA）→ 数字人注视转向
+- `docs/tts-voice-design.md` — 自定义音色 TTS（provider 抽象已落地；音色克隆 / 流式待 P1/P2）
 - `docs/superpowers/specs/` — 设计规格（superpowers 流程产出）
+- `voices/` — 本地音色注册表（`voices/<id>/meta.json`，参考音频不入库，见其 README）
 - `scripts/` — 静态自检：密钥扫描 / 工具 Schema / 记忆模块
 - `backend/` — FastAPI + WebSocket 流式后端
   - `pipeline/llm_client.py` — LLM 流式客户端（百炼 MaaS / Ark / llama.cpp / Ollama 四选一）

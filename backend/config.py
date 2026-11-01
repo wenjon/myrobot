@@ -84,6 +84,26 @@ TTS_VOLUME = os.getenv("TTS_VOLUME", "+0%")
 # 代价：一句拆 N 段就是 N 次合成请求，首句延迟略增，详见 docs 第 18.6。
 TTS_PROSODY = os.getenv("TTS_PROSODY", "broadcast")
 
+# ---- TTS provider 与音色注册表（P0，详见 docs/tts-voice-design.md）----
+# 尝试顺序，逗号分隔。留空时由 TTS_ENGINE 推导：
+#   edge -> edge；web -> 空（服务端不合成）；其它 -> <引擎>,edge
+TTS_PROVIDER_ORDER = os.getenv("TTS_PROVIDER_ORDER", "")
+# 本地音色目录（相对仓库根目录）。voices/<id>/meta.json 即一个音色。
+TTS_VOICE_DIR = os.getenv("TTS_VOICE_DIR", "voices")
+# 默认逻辑音色 ID；留空则沿用 TTS_VOICE（Edge 预设音色名）。
+TTS_DEFAULT_VOICE = os.getenv("TTS_DEFAULT_VOICE", "")
+# 单次合成最大字符数，超出截断，避免长文把播放队列拖死。
+TTS_MAX_CHARS = int(os.getenv("TTS_MAX_CHARS", "200"))
+# P1/P2 预留：本地克隆模型服务与云端复刻（P0 不读取，先占位避免配置漂移）。
+TTS_COSYVOICE_URL = os.getenv("TTS_COSYVOICE_URL", "http://127.0.0.1:9880")
+TTS_COSYVOICE_TIMEOUT_MS = int(os.getenv("TTS_COSYVOICE_TIMEOUT_MS", "8000"))
+TTS_CLOUD_VENDOR = os.getenv("TTS_CLOUD_VENDOR", "")
+TTS_CLOUD_KEY = os.getenv("TTS_CLOUD_KEY", "")
+TTS_CLOUD_VOICE_ID = os.getenv("TTS_CLOUD_VOICE_ID", "")
+TTS_STREAM = os.getenv("TTS_STREAM", "0") == "1"
+TTS_SAMPLE_RATE = int(os.getenv("TTS_SAMPLE_RATE", "24000"))
+TTS_MARKS_SOURCE = os.getenv("TTS_MARKS_SOURCE", "auto")
+
 # 智能分句参数
 SENTENCE_MIN_LEN = int(os.getenv("SENTENCE_MIN_LEN", "8"))
 SENTENCE_MAX_LEN = int(os.getenv("SENTENCE_MAX_LEN", "24"))

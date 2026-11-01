@@ -16,8 +16,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import pathlib
 import sys
+import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "backend"))
@@ -156,6 +158,186 @@ def test_emotion_coverage():
         warnings.append("EMOTION_BIAS 有多余项（head3d.js 无此表情）：%s" % ", ".join(sorted(extra)))
 
 
+# ---------------------------------------------------------------- 离线：音色注册表
+def test_voice_registry():
+    """覆盖 P0 的注册表规则：缺 ref、拒绝公众人物、坏 JSON、edge_voice 映射。"""
+    from tts.voices import VoiceRegistry
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+
+        def add(name, meta, ref=False):
+            d = root / name
+            d.mkdir()
+            (d / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+            if ref:
+                (d / "ref.wav").write_bytes(b"RIFF")
+
+        add("good", {"display_name": "好音色", "source": "clone", "consent": {"type": "self"}}, ref=True)
+        add("noref", {"display_name": "缺样本", "source": "clone"})
+        add("denied", {"display_name": "公众人物", "source": "clone",
+                       "consent": {"type": "public-figure"}}, ref=True)
+        add("preset", {"display_name": "预设", "source": "edge", "edge_voice": "zh-CN-XiaoxiaoNeural"})
+        add("unmapped", {"display_name": "本地方案", "source": "clone"}, ref=True)
+        (root / "broken").mkdir()
+        (root / "broken" / "meta.json").write_text("{not json", encoding="utf-8")
+        (root / "no_meta").mkdir()
+
+        reg = VoiceRegistry(root)
+        entries, diags = reg.scan()
+        by_id = {e.id: e for e in entries}
+
+        check("broken" not in by_id, "坏 meta.json 应被跳过，而不是让整次扫描失败")
+        check(any("broken" in d for d in diags), "坏 meta.json 应产生诊断信息")
+        check("no_meta" not in by_id, "没有 meta.json 的目录应忽略")
+
+        check(by_id["good"].available, "有 ref.wav 的克隆音色应可用")
+        check(not by_id["noref"].available and by_id["noref"].reason == "missing_ref_audio",
+              "缺 ref.wav 应标记 missing_ref_audio，实际 %s" % by_id["noref"].reason)
+        check(not by_id["denied"].available and by_id["denied"].reason == "consent_denied",
+              "public-figure 必须拒绝加载")
+
+        v, note = reg.resolve_for_provider("preset", "edge")
+        check(v == "zh-CN-XiaoxiaoNeural" and not note, "edge 音色应映射到 edge_voice")
+        v2, note2 = reg.resolve_for_provider("unmapped", "edge")
+        check(v2 == "" and "回退默认" in note2, "本地音色未配 edge_voice 时应回退默认并给提示")
+        v3, _ = reg.resolve_for_provider("zh-CN-YunxiNeural", "edge")
+        check(v3 == "zh-CN-YunxiNeural", "未知 ID 应原样透传（兼容旧的 Edge 音色名）")
+
+
+# ---------------------------------------------------------------- 离线：provider 装配
+def test_provider_order():
+    from tts.registry import provider_order
+
+    check(provider_order("edge", "") == ["edge"], "edge 应只尝试 edge")
+    check(provider_order("web", "") == [], "web 不应在服务端合成")
+    check(provider_order("cosyvoice", "") == ["cosyvoice", "edge"], "新引擎应带回退到 edge")
+    check(provider_order("edge", " cosyvoice , edge ,, cosyvoice ") == ["cosyvoice", "edge"],
+          "显式顺序应去空白、去重并保序")
+
+
+class _FakeProvider:
+    """自检用的最小 provider：可配置探活结果、是否失败、音色清单。"""
+
+    supports_stream = False
+    supports_clone = True
+    emotions = frozenset()
+
+    def __init__(self, name="fake", *, healthy=True, fail=False, voices=None, audio=b"ID3fake"):
+        self.name = name
+        self._healthy = healthy
+        self._fail = fail
+        self._voices = list(voices or [])
+        self._audio = audio
+        self.last_req = None
+
+    async def health(self):
+        return self._healthy
+
+    async def list_voices(self):
+        return self._voices
+
+    async def synthesize(self, req):
+        from tts.base import TTSMark, TTSResult, TTSUnavailable
+
+        self.last_req = req
+        if self._fail:
+            raise TTSUnavailable("模拟失败")
+        return TTSResult(
+            audio=self._audio, mime="audio/mpeg",
+            marks=[TTSMark(char_index=0, text="你", offset_ms=0, duration_ms=100)],
+            duration_ms=100.0, provider=self.name, voice=req.voice or "default",
+        )
+
+    async def cancel(self, seq):
+        return None
+
+
+def test_registry_fallback():
+    """降级链、截断、音色解析、返回结构四件事一起验。"""
+    from tts.base import TTSRequest, TTSUnavailable
+    from tts.registry import TTSRegistry
+    from tts.voices import VoiceRegistry
+
+    with tempfile.TemporaryDirectory() as tmp:
+        bad = _FakeProvider("bad", fail=True)
+        good = _FakeProvider("good")
+        reg = TTSRegistry(
+            VoiceRegistry(tmp), order=["bad", "good"], default_voice="",
+            max_chars=10,
+            factories={"bad": lambda: bad, "good": lambda: good},
+        )
+        out = asyncio.run(reg.synthesize(TTSRequest(text="你好呀，这是一个很长的句子")))
+        check(out["provider"] == "good", "第一个 provider 失败应自动降级到下一个")
+        check(good.last_req.text == "你好呀，这是一个很长", "超长文本应按 max_chars 截断")
+        check(out["marks"] and out["audio"], "返回结构应含音频与时间轴")
+
+        only_bad = TTSRegistry(
+            VoiceRegistry(tmp), order=["bad"], factories={"bad": lambda: _FakeProvider("bad", fail=True)},
+        )
+        try:
+            asyncio.run(only_bad.synthesize(TTSRequest(text="你好")))
+        except TTSUnavailable:
+            pass
+        else:
+            check(False, "全部 provider 失败时应抛 TTSUnavailable")
+
+        unhealthy = TTSRegistry(
+            VoiceRegistry(tmp), order=["cold"],
+            factories={"cold": lambda: _FakeProvider("cold", healthy=False)},
+        )
+        try:
+            asyncio.run(unhealthy.synthesize(TTSRequest(text="你好")))
+        except TTSUnavailable:
+            pass
+        else:
+            check(False, "探活失败的 provider 不应被调用")
+
+
+def test_voice_listing():
+    """本地音色 + 引擎音色合并，字段必须补齐成前端认识的结构。"""
+    from tts.registry import TTSRegistry
+    from tts.voices import VoiceRegistry
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp) / "v"
+        d = root / "mine"
+        d.mkdir(parents=True)
+        (d / "meta.json").write_text(json.dumps({"display_name": "我的音色", "source": "edge",
+                                                 "edge_voice": "zh-CN-XiaoyiNeural"}), encoding="utf-8")
+        fake = _FakeProvider("fake", voices=[
+            {"name": "v1", "locale": "zh-CN", "gender": "Female"},
+            {"name": "en1", "locale": "en-US", "gender": "Male"},
+        ])
+        reg = TTSRegistry(VoiceRegistry(root), order=["fake"], factories={"fake": lambda: fake})
+        out = asyncio.run(reg.list_voices("zh"))
+        ids = {v["id"] for v in out["voices"]}
+        check("mine" in ids, "本地音色应出现在清单里")
+        check("v1" in ids and "en1" not in ids, "应按 locale 过滤引擎音色")
+        mine = next(v for v in out["voices"] if v["id"] == "mine")
+        check(mine["source"] == "edge" and mine["available"], "本地音色字段应完整且可用")
+        v1 = next(v for v in out["voices"] if v["id"] == "v1")
+        check(v1["source"] == "fake" and "categories" in v1, "引擎音色应补齐统一字段")
+
+
+def test_result_contract():
+    """TTSResult.to_legacy() 必须与旧接口同构（前端零改动的前提）。"""
+    import base64
+    from tts.base import TTSMark, TTSResult
+
+    r = TTSResult(audio=b"abc", mime="audio/mpeg",
+                  marks=[TTSMark(0, "你", 0, 120)], duration_ms=123.45,
+                  provider="edge", voice="v", segments=2, style="broadcast")
+    d = r.to_legacy()
+    check(base64.b64decode(d["audio"]) == b"abc", "audio 必须 base64 往返一致")
+    check(d["marks"][0]["char_index"] == 0 and d["marks"][0]["duration_ms"] == 120,
+          "marks 字段名应与前端消费格式一致")
+    check(d["duration_ms"] == 123.5 or d["duration_ms"] == 123.4,
+          "duration_ms 应保留一位小数，实际 %s" % d["duration_ms"])
+    for key in ("mime", "voice", "provider", "segments", "style", "marks_source"):
+        check(key in d, "旧接口结构缺少字段 %s" % key)
+
+
 # ---------------------------------------------------------------- 在线：真实合成
 async def test_online():
     from pipeline.tts_edge import TTSUnavailable, synthesize
@@ -192,7 +374,12 @@ def main():
     test_frame_parsing()
     test_prosody_plan()
     test_emotion_coverage()
-    print("离线检查完成（帧解析 / 韵律规划 / 情绪覆盖）")
+    test_voice_registry()
+    test_provider_order()
+    test_registry_fallback()
+    test_voice_listing()
+    test_result_contract()
+    print("离线检查完成（帧解析 / 韵律规划 / 情绪覆盖 / 音色注册表 / 降级链 / 返回契约）")
     asyncio.run(test_online())
 
     for warn in warnings:

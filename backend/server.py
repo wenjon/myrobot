@@ -27,6 +27,7 @@ from config import (
     HOST, PORT, LLM_PROVIDER, OLLAMA_MODEL, ARK_MODEL, MAAS_MODEL, LOG_CONTEXT, CONTEXT_LOG_FILE,
     SHOW_REAL_IP, INTERRUPT_MODE,
     TTS_ENGINE, TTS_VOICE, TTS_RATE, TTS_PITCH, TTS_VOLUME, TTS_PROSODY,
+    TTS_PROVIDER_ORDER, TTS_VOICE_DIR, TTS_DEFAULT_VOICE, TTS_MAX_CHARS,
     VOICE_AUTOSTART, VOICE_SILENCE_MS, VOICE_RESUME_DELAY_MS, ASR_LANG,
     DOA_PUSH_HZ,
 )
@@ -36,7 +37,9 @@ from pipeline.conversation import conversations
 from doa.service import doa_service   # 声源测向（麦克风阵列 → 数字人注视）
 from pipeline.agent import agent_stream
 from pipeline.turn_policy import classify_incoming
-from pipeline.tts_edge import TTSUnavailable, list_voices, synthesize
+from tts.base import TTSRequest, TTSUnavailable
+from tts.registry import TTSRegistry, provider_order
+from tts.voices import VoiceRegistry
 from tools import REGISTRY, RESOURCES, load_all
 
 # server_app 拆出的业务辅助模块：
@@ -137,6 +140,11 @@ async def lifespan(app: FastAPI):
     doa_service.set_logger(_emit)
     doa_service.start()
     _start_vision()
+    # TTS provider 探活：只验证依赖是否可导入，不请求网络（断网不该拖慢启动）。
+    tts_status = await TTS.ensure_ready()
+    ready = tts_status["available"]
+    _emit(f"[TTS] provider 就绪: {ready or '无（前端将降级 Web Speech）'}"
+          f"；音色目录: {tts_status['voice_dir']}")
     try:
         yield
     finally:
@@ -202,6 +210,23 @@ FRONTEND_DIR = (Path(__file__).resolve().parent.parent / "frontend")
 
 
 # =====================================================================
+# TTS 能力层（P0）：provider 装配 + 本地音色注册表
+# =====================================================================
+# 这里只建对象、不探活；真正的探活放在 lifespan，避免 import 阶段做 I/O。
+# TTS_VOICE_DIR 允许写相对路径（相对仓库根目录），方便换机器不用改 .env。
+_TTS_VOICE_ROOT = Path(TTS_VOICE_DIR)
+if not _TTS_VOICE_ROOT.is_absolute():
+    _TTS_VOICE_ROOT = Path(__file__).resolve().parent.parent / _TTS_VOICE_ROOT
+
+TTS = TTSRegistry(
+    VoiceRegistry(_TTS_VOICE_ROOT),
+    order=provider_order(TTS_ENGINE, TTS_PROVIDER_ORDER),
+    default_voice=TTS_DEFAULT_VOICE,
+    max_chars=TTS_MAX_CHARS,
+)
+
+
+# =====================================================================
 # HTTP 路由
 # =====================================================================
 @app.get("/")
@@ -217,7 +242,8 @@ async def health():
     return {
         "ok": True, "provider": LLM_PROVIDER, "model": model,
         "tts": {"engine": TTS_ENGINE, "voice": TTS_VOICE, "prosody": TTS_PROSODY,
-                "rate": TTS_RATE, "pitch": TTS_PITCH},
+                "rate": TTS_RATE, "pitch": TTS_PITCH,
+                "providers": TTS.status()["available"]},
         "asr": {"autostart": VOICE_AUTOSTART, "silence_ms": VOICE_SILENCE_MS,
                 "resume_delay_ms": VOICE_RESUME_DELAY_MS, "lang": ASR_LANG},
     }
@@ -304,18 +330,26 @@ async def vision_stream():
 # 用于精确驱动口型（Web Speech 的 boundary 事件在部分浏览器上根本不触发）。
 @app.get("/api/tts/config")
 async def tts_config():
-    """前端启动时拉一次，决定用 edge 还是降级到 Web Speech。"""
+    """前端启动时拉一次，决定用 edge 还是降级到 Web Speech。
+
+    新增字段全部是向后兼容的「加字段」：旧前端只读 engine/voice/prosody/rate/pitch。
+    """
+    status = TTS.status()
     return {"engine": TTS_ENGINE, "voice": TTS_VOICE, "prosody": TTS_PROSODY,
-            "rate": TTS_RATE, "pitch": TTS_PITCH, "volume": TTS_VOLUME}
+            "rate": TTS_RATE, "pitch": TTS_PITCH, "volume": TTS_VOLUME,
+            "default_voice": TTS_DEFAULT_VOICE or TTS_VOICE,
+            "provider_order": status["order"],
+            "providers": status["available"],
+            "sample_rate": 24000, "stream": False}
 
 
 @app.get("/api/tts/voices")
 async def tts_voices(locale: str = "zh"):
-    """可用音色清单（调试/切换音色用）。"""
-    try:
-        return {"ok": True, "voices": await list_voices(locale)}
-    except TTSUnavailable as exc:
-        return {"ok": False, "error": str(exc), "voices": []}
+    """可用音色清单：Edge 预设 + 本地注册表合并（调试/切换音色用）。
+
+    任何一路失败都只进 warnings，不抛 500——音色面板坏掉不该影响对话。
+    """
+    return await TTS.list_voices(locale)
 
 
 @app.post("/api/tts")
@@ -326,8 +360,8 @@ async def tts(payload: dict = Body(...)):
     宁可音色差一点也不能让数字人变哑巴。
     """
     try:
-        result = await synthesize(
-            payload.get("text", ""),
+        result = await TTS.synthesize(TTSRequest(
+            text=payload.get("text", ""),
             voice=payload.get("voice", ""),
             rate=payload.get("rate", ""),
             pitch=payload.get("pitch", ""),
@@ -335,7 +369,8 @@ async def tts(payload: dict = Body(...)):
             # 情绪基调：前端把当前表情一起带上来，让声音跟着表情走（视听一致）
             emotion=payload.get("emotion", ""),
             style=payload.get("style", ""),
-        )
+            seq=str(payload.get("seq", "")),
+        ))
         result["ok"] = True
         return result
     except TTSUnavailable as exc:
