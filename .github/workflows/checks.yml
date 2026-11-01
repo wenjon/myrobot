@@ -65,7 +65,11 @@ jobs:
       - name: 声源测向（DOA）自检
         # 麦克风阵列测向：用合成声源验证 GCC-PHAT 方位反解、能量门限与 TTS 冻结。
         # 纯离线：不请求 LLM、不需要阵列、不需 Key（docs/doa-gaze-design.md）。
-        run: python scripts/check_doa.py
+        # numpy 只被 DOA 自检使用，未列入运行时依赖；CI 里单独装，避免把
+        # 「可选能力」强加给所有部署环境。
+        run: |
+          pip install -q numpy
+          python scripts/check_doa.py
 
       - name: 关键模块可导入自检
         # 比 compileall 更进一步：真正 import 一次，能捕到循环引用 / 笔误的模块名。
