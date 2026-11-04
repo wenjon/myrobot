@@ -18,6 +18,7 @@
 - 🎤 **语音输入为默认方式** — 打开页面即常开麦克风，说完停顿一下自动发送；同时随时可以打字
 - 👁️ **视觉浮层 + 结构光测距** — 左下角小窗显示相机实时画面 + 物体识别 + 真实距离/方位（移植自 VisionDev）
 - 🔌 **多 LLM 供应商** — 阿里云百炼 MaaS / 火山引擎 Ark / llama.cpp / Ollama 一行配置切换
+- 🚦 **本地单卡排队** — 前台对话优先、后台摘要让路；并发行为实测见 `docs/local-inference-scheduling.md`
 
 ## 快速开始
 
@@ -68,6 +69,7 @@ python -m compileall -q backend/ scripts/          # Python 语法
 python scripts/check_no_hardcoded_secrets.py       # 密钥硬编码扫描
 python scripts/check_tool_schemas.py               # 工具 JSON Schema 自检
 python scripts/check_memory.py                     # 记忆模块自检（67 项断言）
+python scripts/check_llm_gate.py                   # 本地推理闸门（串行/优先级/FIFO/取消）
 python scripts/check_expressions.py                # 表情/动作 四处一致性 + blendshape 覆盖率
 python scripts/check_text_router.py                # 标记解析（含模型真实输出的回归用例）
 python scripts/check_vision.py                     # 视觉纯逻辑（追踪 id / 类名中文化 / 权重解析）

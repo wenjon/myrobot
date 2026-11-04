@@ -10,6 +10,7 @@
 - chat_once(messages)   -> 一次性返回完整文本（用于摘要等内部任务）
 """
 import json
+from contextlib import asynccontextmanager
 from typing import AsyncIterator, List, Dict
 
 import httpx
@@ -29,9 +30,30 @@ from config import (
     LLAMACPP_MODEL,
     LLAMACPP_API_KEY,
     ENABLE_THINKING,
+    LLM_MAX_CONCURRENCY,
+)
+from pipeline.llm_gate import (
+    PRIORITY_FOREGROUND,
+    PriorityGate,
+    resolve_concurrency,
 )
 
 _TIMEOUT = httpx.Timeout(180.0, connect=10.0)
+
+# 本地单卡后端串行、云端不限；配置见 config.LLM_MAX_CONCURRENCY。
+# 具体多少由 resolve_concurrency 决定，0 表示完全不建闸门。
+_CONCURRENCY = resolve_concurrency(LLM_PROVIDER, LLM_MAX_CONCURRENCY)
+_GATE = PriorityGate(_CONCURRENCY) if _CONCURRENCY > 0 else None
+
+
+@asynccontextmanager
+async def _slot(priority: int):
+    """占一个推理槽位；没有闸门（云端/显式关闭）时是空操作。"""
+    if _GATE is None:
+        yield
+        return
+    async with _GATE.slot(priority):
+        yield
 
 
 # =====================================================================
@@ -287,19 +309,21 @@ async def _llamacpp_with_tools(messages, tools, temperature):
 # =====================================================================
 # 统一入口
 # =====================================================================
-async def stream_chat(messages: List[Dict[str, str]], temperature: float = 0.7) -> AsyncIterator[str]:
-    if LLM_PROVIDER == "maas":
-        async for tok in _maas_stream(messages, temperature):
-            yield tok
-    elif LLM_PROVIDER == "ark":
-        async for tok in _ark_stream(messages, temperature):
-            yield tok
-    elif LLM_PROVIDER == "llamacpp":
-        async for tok in _llamacpp_stream(messages, temperature):
-            yield tok
-    else:
-        async for tok in _ollama_stream(messages, temperature):
-            yield tok
+async def stream_chat(messages: List[Dict[str, str]], temperature: float = 0.7,
+                      priority: int = PRIORITY_FOREGROUND) -> AsyncIterator[str]:
+    async with _slot(priority):
+        if LLM_PROVIDER == "maas":
+            async for tok in _maas_stream(messages, temperature):
+                yield tok
+        elif LLM_PROVIDER == "ark":
+            async for tok in _ark_stream(messages, temperature):
+                yield tok
+        elif LLM_PROVIDER == "llamacpp":
+            async for tok in _llamacpp_stream(messages, temperature):
+                yield tok
+        else:
+            async for tok in _ollama_stream(messages, temperature):
+                yield tok
 
 
 # =====================================================================
@@ -307,30 +331,34 @@ async def stream_chat(messages: List[Dict[str, str]], temperature: float = 0.7) 
 # 第一阶段用它探测「LLM 是否想调用工具」；无工具则可回退流式直接答。
 # =====================================================================
 async def chat_with_tools(messages: List[Dict], tools: List[Dict],
-                          temperature: float = 0.3) -> Dict:
+                          temperature: float = 0.3,
+                          priority: int = PRIORITY_FOREGROUND) -> Dict:
     """带 tools 的非流式对话。
 
     返回: {"content": str, "tool_calls": [{"id","name","arguments"(dict)}...]}
     tool_calls 为空表示 LLM 选择直接回答（不调用工具）。
     """
-    if LLM_PROVIDER == "maas":
-        return await _maas_with_tools(messages, tools, temperature)
-    if LLM_PROVIDER == "ark":
-        return await _ark_with_tools(messages, tools, temperature)
-    if LLM_PROVIDER == "llamacpp":
-        return await _llamacpp_with_tools(messages, tools, temperature)
-    return await _ollama_with_tools(messages, tools, temperature)
+    async with _slot(priority):
+        if LLM_PROVIDER == "maas":
+            return await _maas_with_tools(messages, tools, temperature)
+        if LLM_PROVIDER == "ark":
+            return await _ark_with_tools(messages, tools, temperature)
+        if LLM_PROVIDER == "llamacpp":
+            return await _llamacpp_with_tools(messages, tools, temperature)
+        return await _ollama_with_tools(messages, tools, temperature)
 
 
 
-async def chat_once(messages: List[Dict[str, str]], temperature: float = 0.3) -> str:
-    if LLM_PROVIDER == "maas":
-        return await _maas_once(messages, temperature)
-    if LLM_PROVIDER == "ark":
-        return await _ark_once(messages, temperature)
-    if LLM_PROVIDER == "llamacpp":
-        return await _llamacpp_once(messages, temperature)
-    return await _ollama_once(messages, temperature)
+async def chat_once(messages: List[Dict[str, str]], temperature: float = 0.3,
+                    priority: int = PRIORITY_FOREGROUND) -> str:
+    async with _slot(priority):
+        if LLM_PROVIDER == "maas":
+            return await _maas_once(messages, temperature)
+        if LLM_PROVIDER == "ark":
+            return await _ark_once(messages, temperature)
+        if LLM_PROVIDER == "llamacpp":
+            return await _llamacpp_once(messages, temperature)
+        return await _ollama_once(messages, temperature)
 
 
 # ---- Ark: 带 tools 的非流式实现 ----

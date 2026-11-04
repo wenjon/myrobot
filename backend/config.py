@@ -35,6 +35,14 @@ _load_env_file()
 #            "ollama"（本地）/ "llamacpp"（本地 llama.cpp OpenAI 兼容服务）
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "maas")
 
+# ---- 本地推理排队（单 NPU / 单卡）----
+# 0 = 自动：ollama / llamacpp 这类本地单卡后端串行（1），云端不限（0）。
+# -1 = 强制不限（llama.cpp 开了 -np 多 slot 时用）。
+# >0 = 显式上限（例如云端也想限制同时请求数）。
+# 串行不会提高吞吐，只把“不可见的排队”变成“可控排队 + 前台优先”，
+# 避免记忆摘要这类后台任务挡住用户说话。详见 docs/local-inference-scheduling.md。
+LLM_MAX_CONCURRENCY = int(os.getenv("LLM_MAX_CONCURRENCY", "0"))
+
 # ---- 阿里云百炼 MaaS（OpenAI 兼容 /compatible-mode/v1）----
 # 与 Ark 走同一套 OpenAI 协议，区别只在 base_url / key / model 三项。
 # 密钥同样不落代码：从环境变量 / .env 读取，缺失时为空字符串（启动时会给出提示）。

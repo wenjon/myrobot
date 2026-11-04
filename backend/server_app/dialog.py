@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import aclosing
 from typing import Optional
 
 from fastapi import WebSocket
@@ -34,6 +35,7 @@ from fastapi import WebSocket
 # 同业务模块、工具框架、记忆上下文接口都在同一个项目下，直接 import 即可。
 from pipeline.agent import agent_stream
 from pipeline.llm_client import chat_once
+from pipeline.llm_gate import PRIORITY_BACKGROUND
 from pipeline.text_router import route
 
 # 服务端「辅助」模块：上下文日志、服务端日志器。
@@ -100,7 +102,10 @@ async def run_dialog(
 
     async def token_stream():
         """绕过 Agent （含工具调用）产出最终答案 token；收到打断信号就停。"""
-        async for tok in agent_stream(
+        # aclosing 是必须的：async generator 被提前 break 时不会自动关闭内层；
+        # 不关就会把 llm_client 里的推理槽位（单 NPU 只有 1 个）一直占住，
+        # 表现就是「打断一次之后，后面所有提问都卡住」。
+        async with aclosing(agent_stream(
             messages,
             session_id=session.id,
             # who 的格式为 "#<conn_id> <peer>"，取第一段作为 conn_id
@@ -108,32 +113,39 @@ async def run_dialog(
             cancel=cancel,
             emit_status=emit_status,
             log_fn=log.emit,
-        ):
-            if cancel.is_set():
-                # 打断了：不再产出新 token，退出生成器。
-                break
-            assistant_text.append(tok)
-            yield tok
+        )) as stream:
+            async for tok in stream:
+                if cancel.is_set():
+                    # 打断了：不再产出新 token，退出生成器。
+                    break
+                assistant_text.append(tok)
+                yield tok
 
     # === 2) 中央调度：消费 token 流，拆出「整句」与「动作」推送 ===
     seq = 0  # 句子序号，前端可用于排序
+    # 两层异步生成器都要显式关闭：router 拆句 + agent 的工具循环。
+    # async with 的退出顺序与书写顺序相反，所以这里先写内层 tokens，
+    # 保证退出时「先关 events，再关 tokens」。
+    tokens = token_stream()
+    events = route(tokens)
     try:
-        async for event in route(token_stream()):
-            if cancel.is_set():
-                break
-            if event["type"] == "sentence":
-                produced = True
-                await ws.send_text(json.dumps(
-                    {"type": "sentence", "text": event["text"], "seq": seq},
-                    ensure_ascii=False,
-                ))
-                seq += 1
-            elif event["type"] == "action":
-                # 表情/动作指令：提前下发，让前端表情与语音同步
-                await ws.send_text(json.dumps(
-                    {"type": "action", "action": event["action"], "value": event["value"]},
-                    ensure_ascii=False,
-                ))
+        async with aclosing(tokens), aclosing(events) as stream:
+            async for event in stream:
+                if cancel.is_set():
+                    break
+                if event["type"] == "sentence":
+                    produced = True
+                    await ws.send_text(json.dumps(
+                        {"type": "sentence", "text": event["text"], "seq": seq},
+                        ensure_ascii=False,
+                    ))
+                    seq += 1
+                elif event["type"] == "action":
+                    # 表情/动作指令：提前下发，让前端表情与语音同步
+                    await ws.send_text(json.dumps(
+                        {"type": "action", "action": event["action"], "value": event["value"]},
+                        ensure_ascii=False,
+                    ))
     except Exception as e:  # noqa: BLE001
         # LLM / 网络等异常：回滚本轮，并把错误告知前端
         session.rollback_turn()
@@ -173,7 +185,11 @@ async def run_dialog(
     # 放在 llm_done 之后就不会拘迟用户听到最后一句话。
     from pipeline.conversation import conversations
     try:
-        await conversations.maybe_summarize(session, chat_once)
+        # 摘要/画像提炼是后台任务：走低优先级，用户下一句话优先占用推理槽位。
+        await conversations.maybe_summarize(
+            session,
+            lambda msgs: chat_once(msgs, priority=PRIORITY_BACKGROUND),
+        )
     except Exception as e:  # noqa: BLE001
         # 反思失败不能影响已经成功的本轮对话，但要把原因打出来，
         # 不能像以前那样静默吃掉（那正是上面那个 bug 潜伏很久的原因）。

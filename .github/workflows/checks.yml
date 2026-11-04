@@ -45,6 +45,11 @@ jobs:
         # 自检内部把 MEMORY_DATA_DIR 指到临时目录，不会碰真实记忆。
         run: python scripts/check_memory.py
 
+      - name: 本地推理闸门自检
+        # 单 NPU/单卡只能串行；这里验证闸门的串行、前台优先、FIFO 与取消不泄漏。
+        # 纯逻辑，不请求 LLM、不需要任何 Key（docs/local-inference-scheduling.md）。
+        run: python scripts/check_llm_gate.py
+
       - name: 表情/动作四处一致性
         # 表情/动作名散落在 head3d.js(EXPR/OVERLAYS)、main.js(EMOTION_SET/ACTION_MAP)、
         # config.py(SYSTEM_PROMPT) 与 text_router.py(简写标记识别) 四处，任一处漏改，
