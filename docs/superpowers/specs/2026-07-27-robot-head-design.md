@@ -19,7 +19,8 @@
 非目标（本阶段不做）：
 - 物理电机 / 伺服驱动 / AEC-AGC 硬件级音频前处理。
 - ~~3D 拟人头（先做 2D 简版嘴型+表情，接口预留可升级 3D）。~~ **已完成**：已升级为 Three.js 3D 数字人（`avatar.glb`，ARKit 52 blendshape + Oculus viseme），详见第 7 章。
-- 生产级性能优化、模型量化、NPU 部署。
+- 生产级性能优化、对话模型量化。~~视觉 YOLO 的模型量化与 NPU 部署~~ **已完成**：
+  2026-11-09 用 Quark XINT8 量化，VitisAI 真正接管，详见 §13.1c 与 `docs/vision-design.md`。
 
 ## 2. 关键技术选型（Demo）
 
@@ -859,9 +860,9 @@ async def lifespan(app: FastAPI):
 | `VISION_YOLO_CONF` | `0.4` | 检测置信度阈值 |
 | `VISION_YOLO_DEVICE` | `cpu` | **仅 Ultralytics 后端**的推理设备；ONNX 路径忽略 |
 | `VISION_YOLO_BACKEND` | `auto` | `auto` / `npuvitis` / `dml` / `onnx` / `ultralytics` |
-| `VISION_YOLO_ONNX_MODEL` | `yolov8n.onnx` | ONNX 权重名或绝对路径 |
+| `VISION_YOLO_ONNX_MODEL` | `auto` | 优先 `yolov8n_xint8.onnx`（量化，NPU 用）；缺失才退回 `yolov8n.onnx`（float，仅 CPU） |
 | `VISION_ONNX_PROVIDER` | `VitisAIExecutionProvider` | ONNX Runtime provider |
-| `VISION_ONNX_CACHE_DIR` / `CACHE_KEY` | `.cache/ryzenai` / `yolov8n_640` | NPU 编译缓存；换模型或输入尺寸要换 key |
+| `VISION_ONNX_CACHE_DIR` / `CACHE_KEY` | `.cache/ryzenai` / （空） | NPU 编译缓存；key 留空时按模型名 + 输入尺寸派生，换模型不会误复用 |
 | `VISION_ONNX_LOG_LEVEL` | `warning` | 算子分区日志级别 |
 | `VISION_ONNX_WARMUP` | `1` | 加载后空跑一张图，稳定首帧 |
 | `VISION_ONNX_INTRA_THREADS` / `INTER_THREADS` / `ALLOW_SPINNING` | `2` / `1` / `0` | CPU 兜底线程限制，防止抢占 LLM/TTS |
@@ -2111,6 +2112,12 @@ OpenAI 兼容协议的最外层 envelope（`model` / `stream` / `temperature` / 
 开两个 FLM 实例同样退化为串行（还多占 11.4GB 显存/内存）。
 
 `-q` 是 NPU 队列长度，`--preemption` 是抢占开关，**都不是并行度**。
+
+**视觉 NPU 与 LLM NPU 共用同一颗 NPU**：YOLO 走 VitisAI EP、FLM 走 Ryzen AI
+运行时，底层是同一块硬件。视觉推理会让 NPU 利用率升到 90%+，两者同时满载时
+必然互相争抢、拉高 TTFT。现行折中是 `VISION_DETECT_EVERY_N=3`（默认每 3 帧
+检测一次），把视觉的 NPU 占用压到可控水平；若做高帧率视觉，需要单独测干扰，
+不能假设“NPU 是无限的”。
 
 ### 24.2 那闸门解决什么
 

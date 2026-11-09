@@ -4,7 +4,11 @@
 为什么单独做一层，而不是给 ultralytics 换个 device：
 - Ultralytics 的 `device=` 走 PyTorch；AMD NPU 在 Windows 上要吃
   ONNX Runtime + VitisAIExecutionProvider，二者不是同一条路。
-- NPU 编译首次很慢（本机实测约 9 秒），编译缓存后单帧约 70~80 ms；
+- VitisAI 只接管**量化过（含 Q/DQ）的子图**。直接喂 float32 ONNX，
+  EP 能注册成功但一个算子都不会接（日志会打 `NO DPU Subgraph Create!`），
+  单帧延迟仍是 CPU 水平。本机实测：float 约 45ms/帧、NPU 引擎占用 0%；
+  XINT8 量化后约 20ms/帧（含前后处理），NPU `engtype_compute` 占用 95%+。
+- 首次加载要编译 DPU 子图，本机约 20 秒；编译产物不落盘，冷启动成本要计入。
   把它和 CPU 路径分开，失败时可以无痛回退。
 
 这一层只负责「图像进 → 检测框出」，接口与 ultralytics 后端保持一致：
@@ -12,8 +16,11 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import shutil
+import tempfile
 import time
 from pathlib import Path
 
@@ -78,9 +85,14 @@ class OnnxYoloDetector:
         self.conf = float(yolo_cfg.get("conf_threshold", 0.4))
         self.nms_iou = float(yolo_cfg.get("nms_iou", 0.45))
         self.max_det = int(yolo_cfg.get("max_det", 300))
-        self.model_path = self._resolve_model(yolo_cfg.get("onnx_model", "yolov8n.onnx"))
+        self.model_path = self._resolve_model(yolo_cfg.get("onnx_model", "auto"))
         self.provider = yolo_cfg.get("provider", "VitisAIExecutionProvider")
         self.warmup_ms = None
+        # 下面三个字段专门回答一个问题：“到底有没有算子在 NPU 上跑？”
+        # 只看到 provider 名字不算数，必须看 profile 里的真实分区事件。
+        self.model_quantized = self._has_qdq(self.model_path)
+        self.npu_subgraphs = None
+        self.npu_active = None
 
         # Ryzen AI 的 EP 需要知道运行时安装位置；用户显式设了就不覆盖。
         ryzen_dir = (yolo_cfg.get("ryzen_ai_path") or "").strip()
@@ -102,7 +114,11 @@ class OnnxYoloDetector:
             Path(cache_dir).mkdir(parents=True, exist_ok=True)
             provider_options = [{
                 "cache_dir": cache_dir,
-                "cache_key": str(yolo_cfg.get("cache_key") or f"yolov8n_{self.input_size}"),
+                # 按模型文件名派生，避免 float 与量化模型复用同一份编译产物
+                "cache_key": str(
+                    yolo_cfg.get("cache_key")
+                    or f"{Path(self.model_path).stem}_{self.input_size}"
+                ),
                 "log_level": str(yolo_cfg.get("log_level") or "warning"),
             }]
 
@@ -118,6 +134,19 @@ class OnnxYoloDetector:
             so.add_session_config_entry("session.intra_op.allow_spinning", "0")
             so.add_session_config_entry("session.inter_op.allow_spinning", "0")
 
+        # 只在 warmup 那一帧开 profile：拿到 VitisAI 子图事件数后立刻关闭并删文件。
+        # 长期开 profiling 会持续写盘，也会给每帧加采样开销。
+        probe_npu = (
+            self.provider == "VitisAIExecutionProvider"
+            and bool(yolo_cfg.get("probe_npu", True))
+            and self.model_quantized
+        )
+        self._profile_dir = None
+        if probe_npu:
+            self._profile_dir = tempfile.mkdtemp(prefix="ort-prof-")
+            so.enable_profiling = True
+            so.profile_file_prefix = str(Path(self._profile_dir) / "probe")
+
         t0 = time.perf_counter()
         self.session = ort.InferenceSession(
             self.model_path,
@@ -132,21 +161,82 @@ class OnnxYoloDetector:
         # 导出时固定 1×3×640×640；这里记录一下，方便启动时核对。
         self.input_shape = self.session.get_inputs()[0].shape
 
-        if bool(yolo_cfg.get("warmup", True)):
+        if bool(yolo_cfg.get("warmup", True)) or probe_npu:
             dummy = np.zeros((1, 3, self.input_size, self.input_size), dtype=np.float32)
             t0 = time.perf_counter()
             self.session.run(None, {self.input_name: dummy})
-            self.warmup_ms = round((time.perf_counter() - t0) * 1000, 1)
+            if bool(yolo_cfg.get("warmup", True)):
+                self.warmup_ms = round((time.perf_counter() - t0) * 1000, 1)
+
+        if probe_npu:
+            self._collect_npu_evidence()
 
         logger.info(
-            "[YOLO-NPU] 模型=%s provider=%s providers=%s 编译=%.1fms warmup=%sms",
+            "[YOLO-NPU] 模型=%s provider=%s providers=%s 量化=%s npu_active=%s "
+            "子图=%s 编译=%.1fms warmup=%sms",
             Path(self.model_path).name, self.provider, self.providers,
+            self.model_quantized, self.npu_active, self.npu_subgraphs,
             self.load_ms, self.warmup_ms,
         )
 
     @staticmethod
+    def _has_qdq(model_path: str) -> bool:
+        """静态检查模型是否含 QuantizeLinear（即 XINT8/INT8 量化模型）。"""
+        try:
+            import onnx
+            return any(
+                node.op_type == "QuantizeLinear"
+                for node in onnx.load(model_path).graph.node
+            )
+        except Exception:  # onnx 缺失或模型损坏时不要阻断启动
+            return False
+
+    def _collect_npu_evidence(self) -> None:
+        """解析 warmup 的 ORT profile，统计真正的 VitisAI 子图执行事件。
+
+        ORT 的 Python API 不提供「算子 → EP」映射；profile 里
+        `VitisAIExecutionProvider_*` 事件是唯一可靠的证据。
+        没有这类事件就说明：EP 只是注册了，算子全在 CPU。
+        """
+        path = None
+        try:
+            path = self.session.end_profiling()
+        except Exception:  # 没开 profiling 或已结束时保持未知
+            path = None
+        try:
+            if path and Path(path).is_file():
+                events = json.loads(Path(path).read_text(encoding="utf-8"))
+                self.npu_subgraphs = sum(
+                    1 for ev in events
+                    if ev.get("cat") == "Node"
+                    and str(ev.get("name", "")).startswith("VitisAIExecutionProvider_")
+                )
+                self.npu_active = self.npu_subgraphs > 0
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[YOLO-NPU] profile 解析失败：%s", exc)
+        finally:
+            if self._profile_dir:
+                shutil.rmtree(self._profile_dir, ignore_errors=True)
+                self._profile_dir = None
+
+    @staticmethod
     def _resolve_model(name: str) -> str:
-        """把配置里的 ONNX 文件名解析为本地路径（与 .pt 的搜索顺序一致）。"""
+        """把配置里的 ONNX 文件名解析为本地路径（与 .pt 的搜索顺序一致）。
+
+        name="auto" 时优先量化模型：它是 NPU 真正能接管的那一份；
+        缺失才退回 float32（此时仍能检测，但只跑 CPU）。
+        """
+        if str(name).strip().lower() == "auto":
+            for candidate in ("yolov8n_xint8.onnx", "yolov8n.onnx"):
+                try:
+                    return OnnxYoloDetector._resolve_model(candidate)
+                except FileNotFoundError:
+                    continue
+            raise FileNotFoundError(
+                "找不到可用 ONNX 模型：请把 yolov8n_xint8.onnx（量化，NPU 用）或 "
+                "yolov8n.onnx（float，CPU 用）放到 backend/vision/weights/，"
+                "或用 VISION_YOLO_ONNX_MODEL 指向绝对路径。"
+            )
         p = Path(name)
         if p.is_absolute() and p.is_file():
             return str(p)
@@ -170,6 +260,11 @@ class OnnxYoloDetector:
             "backend": "onnx",
             "provider": self.provider,
             "providers": self.providers,
+            # provider 只是“注册成功”；npu_active 才是“算子真的跑在 NPU 上”。
+            "provider_registered": self.provider in self.providers,
+            "npu_active": bool(self.npu_active),
+            "npu_subgraphs": self.npu_subgraphs,
+            "model_quantized": self.model_quantized,
             "model": Path(self.model_path).name,
             "input_size": self.input_size,
             "load_ms": self.load_ms,

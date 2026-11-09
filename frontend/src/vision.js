@@ -82,7 +82,10 @@ export function initVision() {
   // 推理后端短名：让用户一眼看出现在到底有没有吃到 NPU，而不是只看到“视觉在跑”。
   function detectorName(det) {
     if (!det) return '';
-    if (det.provider === 'VitisAIExecutionProvider') return 'NPU';
+    // 只有后端确认 profile 里出现了 VitisAI 子图，才敢标 NPU；
+    // 仅凭 provider 名字会把“注册了但全跑 CPU”误报成 NPU（真实踩过）。
+    if (det.npu_active === true) return 'NPU';
+    if (det.provider === 'VitisAIExecutionProvider') return 'CPU';
     if (det.provider === 'DmlExecutionProvider') return 'GPU';
     if (det.backend === 'onnx') return 'ONNX';
     return 'CPU';

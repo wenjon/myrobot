@@ -264,20 +264,23 @@ DOA_FOV_Y      = float(os.getenv("DOA_FOV_Y", "40"))        # 屏幕垂直视野
 # 所以前两条至少要命中一条，否则模型加载会一直重试）。
 VISION_YOLO_MODEL = os.getenv("VISION_YOLO_MODEL", "yolov8n.pt")
 # 检测后端：auto / ultralytics / onnx / npuvitis / dml
-#   auto       → 有 .onnx 且 ONNX Runtime 带 VitisAI 时走 NPU，否则回退 PyTorch
+#   auto       → 有量化 .onnx 且 ONNX Runtime 带 VitisAI 时才走 NPU，否则回退 PyTorch
 #   npuvitis   → 强制 AMD NPU（失败仍会回退，但原因会显示在 /api/vision/status）
 #   dml        → ONNX Runtime DirectML（AMD GPU）
 #   ultralytics→ 保持原 PyTorch 路径
 # 注意：NPU EP 来自 onnxruntime-vitisai；若用默认全局 Python 启动，通常没有它，
 # 此时 auto 会自动回退 CPU。要用 NPU 请用 .venv-ryzenai 里的 Python 启动。
 VISION_YOLO_BACKEND = os.getenv("VISION_YOLO_BACKEND", "auto")
-# 纯 ONNX 模型；由 yolov8n.pt 导出（固定 1×3×640×640，输出 1×84×8400）
-VISION_YOLO_ONNX_MODEL = os.getenv("VISION_YOLO_ONNX_MODEL", "yolov8n.onnx")
+# ONNX 模型选择：
+#   auto → 优先 yolov8n_xint8.onnx（量化，NPU 唯一能接管的形式），缺失才用 float
+#   也可直接写文件名/绝对路径。float 模型 provider 虽注册成功，但算子全在 CPU。
+VISION_YOLO_ONNX_MODEL = os.getenv("VISION_YOLO_ONNX_MODEL", "auto")
 # ONNX Runtime ExecutionProvider：VitisAIExecutionProvider（NPU）或 DmlExecutionProvider（GPU）
 VISION_ONNX_PROVIDER = os.getenv("VISION_ONNX_PROVIDER", "VitisAIExecutionProvider")
-# VitisAI 编译缓存：首次编译约数秒~十几秒，缓存后复用可显著缩短启动
+# VitisAI 编译缓存：当前版本不落盘，冷启动仍要重新编译 DPU 子图（约 20 秒）
 VISION_ONNX_CACHE_DIR = os.getenv("VISION_ONNX_CACHE_DIR", ".cache/ryzenai")
-VISION_ONNX_CACHE_KEY = os.getenv("VISION_ONNX_CACHE_KEY", "yolov8n_640")
+# 留空 = 按模型文件名派生，避免 float/量化模型误用同一份编译产物
+VISION_ONNX_CACHE_KEY = os.getenv("VISION_ONNX_CACHE_KEY", "")
 # ONNX Runtime / EP 日志：warning 足够；info 会打印大量算子分区日志
 VISION_ONNX_LOG_LEVEL = os.getenv("VISION_ONNX_LOG_LEVEL", "warning")
 VISION_ONNX_WARMUP = os.getenv("VISION_ONNX_WARMUP", "1") == "1"

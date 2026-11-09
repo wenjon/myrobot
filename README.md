@@ -133,7 +133,7 @@ cloudflared tunnel --url http://127.0.0.1:8000
 - **LLM**：默认阿里云百炼 Model Studio（需 `MAAS_API_KEY`，模型 `qwen3.6-flash`）；或火山引擎 Ark（`LLM_PROVIDER=ark`，需 `ARK_API_KEY`）、本地 **llama.cpp**（`LLM_PROVIDER=llamacpp`，默认 `http://127.0.0.1:8080/v1`）/ **Ollama**（`LLM_PROVIDER=ollama`），后两者均无需密钥
 - **Python 3.10+**：`pip install -r backend/requirements.txt`
 - **视觉（可选）**：`opencv-python` + `numpy`，再任选一条推理路径：
-  - NPU：`onnxruntime-vitisai` + `yolov8n.onnx`（推荐 `scripts/run_server_npu.ps1` 启动）；
+  - NPU：`onnxruntime-vitisai` + **量化** `yolov8n_xint8.onnx`（推荐 `scripts/run_server_npu.ps1` 启动）；
   - CPU 兜底：`ultralytics`（含 torch）+ `yolov8n.pt`。
   两套权重都放 `backend/vision/weights/`（不入库）。缺依赖/权重时视觉整块自动降级，
   对话不受影响。实际生效的后端看 `/api/vision/status.detector`。
@@ -154,21 +154,24 @@ python backend\server.py
 ```powershell
 .\scripts\run_server_npu.ps1          # 默认用 .venv-ryzenai，监听 8000
 curl -s http://127.0.0.1:8000/api/vision/status
-# 看 detector.backend / provider / fallback_reason：
-#   backend=onnx + provider=VitisAIExecutionProvider  → NPU 路径生效
-#   backend=ultralytics 或 fallback_reason 非空       → 当前是 CPU 兜底
+# 看 detector.npu_active / npu_subgraphs，而不是 provider 名字：
+#   npu_active=true 且 npu_subgraphs>0        → NPU 真正接管
+#   provider 是 VitisAI 但 npu_active=false   → 仍是 CPU
+#   backend=ultralytics 或 fallback_reason 非空 → CPU 兜底
 ```
 
-首次启动会花 8~14 秒编译 NPU 子图。NPU 只接管部分算子，检测头仍回落到 CPU，
-所以脚本把 ORT 兜底线程限制为 `intra=2 / inter=1 / spinning=0`，避免抢占
-LLM/TTS。本机实测（`bus.jpg`，30 次中位数）：
+**必须用量化模型 NPU 才会真正接管**：float32 ONNX 虽然能注册 VitisAI EP，
+但 profile 里没有任何 NPU 执行事件，实际全在 CPU 跑（本机 45.6ms/帧、占用 0%）。
+用 `scripts/quantize_yolo.py` 生成 XINT8 模型后，首次编译约 20 秒，
+端到端降到 **20.7ms/帧**、NPU 引擎占用 **95.6%**，纯推理约 68~71 FPS。
+最终输出 Concat 保持 float32 是精度妥协，否则类别概率会被量化成 0。
+脚本仍把 ORT 兜底线程限制为 `intra=2 / inter=1 / spinning=0`，避免抢占 LLM/TTS。
+详见 `docs/vision-design.md` §3.4 / §7.1c / §8。
 
-| 后端 | 墙钟延迟 | 进程 CPU 时间/帧 |
-|---|---:|---:|
-| Ultralytics / CPU | 28.3ms | 218.8ms |
-| ONNX / VitisAI | 49.4ms | **78.1ms** |
-
-收益是 CPU 时间降到约 1/3，而不是单帧更快；详见 `docs/vision-design.md` §3.4 / §9。
+```powershell
+# 看 detector.npu_active / npu_subgraphs，而不是只看 provider 名字
+curl -s http://127.0.0.1:8000/api/vision/status
+```
 
 可用环境变量覆盖配置（见 `backend/config.py`）：
 - `LLM_PROVIDER`（`maas` 阿里云百炼（默认）/ `ark` 火山引擎 / `llamacpp` 本地 llama.cpp / `ollama` 本地 Ollama）
@@ -228,17 +231,19 @@ LLM/TTS。本机实测（`bus.jpg`，30 次中位数）：
 `primesense` 这个 Python 封装在 Python 3.13 上直接 import 失败。
 而厂商自带的 `DepthReaderPoll.exe` 能正常出深度帧——所以最终选了 C API。
 
-### 需要手工准备的两样东西（都不入库）
+### 需要手工准备的权重与 SDK（都不入库）
 
 | 资源 | 关键信息 | 放哪 |
 |---|---|---|
-| **YOLO 权重（NPU）** | `yolov8n.onnx`，12,824,061 字节，opset 12，输入 1×3×640×640，SHA256 `64B00AF2...A82968` | `backend/vision/weights/yolov8n.onnx` |
+| **YOLO 权重（NPU）** | `yolov8n_xint8.onnx`，3,544,884 字节，Quark XINT8，SHA256 `3705DD49...49AD9F`；由 float ONNX 量化生成，不入库 | `backend/vision/weights/yolov8n_xint8.onnx` |
+| **YOLO float ONNX（量化输入）** | `yolov8n.onnx`，12,824,061 字节，opset 12，输入 1×3×640×640；本身只跑 CPU | `backend/vision/weights/yolov8n.onnx` |
 | **YOLO 权重（CPU 兜底）** | `yolov8n.pt`，6,549,796 字节，SHA256 `f59b3d83...c83b36`，适配 ultralytics `8.4.170` | `backend/vision/weights/yolov8n.pt` |
 | **Astra SDK** | AstraSDK **v2.1.3**（build `94bca0f52e`，VS2015 win64），需 `astra_core.dll` + `astra.dll` | 用 `VISION_ASTRA_SDK_DIR` 指向其 `bin` 目录 |
 
 `.pt` 官方下载：`https://github.com/ultralytics/assets/releases/download/v8.4.0/yolov8n.pt`
 （若本机连不上 GitHub，用 `VISION_MODEL_DIR` 指向别处已下好的权重目录即可。
-`.onnx` 由本地 `.pt` 导出：`format=onnx, opset=12, imgsz=640, dynamic=False`。）
+`.onnx` 由本地 `.pt` 导出：`format=onnx, opset=12, imgsz=640, dynamic=False`；
+再用 `python scripts/quantize_yolo.py --calib-dir .scratch\calib_src` 生成 XINT8。）
 
 完整的下载、校验（SHA256）、换更大模型、驱动安装说明见
 **`docs/vision-design.md` §7**。
