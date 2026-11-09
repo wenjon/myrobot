@@ -143,7 +143,7 @@ Qwen3 系列默认会先输出一大段**深度思考**（`reasoning_content`）
 
 ## 5. 接口契约（WebSocket JSON 消息）
 
-以下是完整定义（共 6 种 C→S、10 种 S→C），部分是后期增量添加的。
+以下是完整定义（共 6 种 C→S、11 种 S→C），部分是后期增量添加的。
 
 客户端 → 服务端:
 - `{"type":"hello","session":"<sid>"}` — 必须首发；`session` 为空则服务端分配新 sid。未发 hello 前的其他帧会被忽略（保证不会错误绑定到别人的会话）。
@@ -164,6 +164,7 @@ Qwen3 系列默认会先输出一大段**深度思考**（`reasoning_content`）
 - `{"type":"interrupted","reason":"question|interrupt|always"}` — 自动 barge-in 时下发（仅 `INTERRUPT_MODE=always/smart` 触发），前端做自然收尾（渐弱 + 「我在听」倾听表情）。详见第 11 章。
 - `{"type":"profile_conflict","conflict_id":"<cid>","field":"name","field_label":"称呼","old_value":"小王","new_value":"老王","source_quote":"以后叫我老王"}` — 画像变更需人工确认（第 16 章 B 方案）。**在本轮 `llm_done` 之后才下发**，避免确认卡打断正在进行的播报。
 - `{"type":"profile_resolved","conflict_id":"<cid>","action":"accept","ok":true}` — 对 `profile_resolve` 的确认。`ok=false` 表示 conflict_id 未知或已超时；**无论成败都会回这一帧**，让前端能销毁卡片而不致于永久悬着。
+- `{"type":"doa_azimuth","az":35.0,"active":true,"status":"ok","ts":1750000000000}` — 声源方向旁路消息（约 5Hz）。`az` 为相对屏幕正前方的水平方位角；`active=false` 时前端保持当前姿态。**不占对话队列**，数字人说话时也能实时更新。详见第 23 章。
 
 协议小结：
 - 连接必须先 `hello` 后才能处理其他帧；
@@ -445,7 +446,7 @@ CI 脚本 `scripts/check_expressions.py` 会自动校验三处一致，防止漏
 - **VRM 支持**：日式二次元模型，需要做 VRM ↔ ARKit 名称映射 + 口型 5 个 → 15 个的插值
 - **预制动画**：走路/挥手/跳舞等，当前模型有 18 个动画但未使用
 - **更精确的口型**：接入 Piper / 音素引擎，从"字符级"升到"音素级"
-- **摄像头跟随**：第 19 章规划中，数字人转头盯着走近的人
+- **摄像头跟随**：感知与测距已落地（第 19 章），行为层待做；当前由声源测向驱动注视（第 23 章）
 - **换装 / 换发型**：RPM 支持配件切换，但需要后端 API
 
 ## 8. 验收标准（Demo 级）
@@ -493,6 +494,9 @@ CI 脚本 `scripts/check_expressions.py` 会自动校验三处一致，防止漏
 - ~~工具调用（function calling）与联网搜索。~~ **已完成**，详见第 10 章。
 - ~~多轮上下文管理与打断安全。~~ **已完成**，详见第 11 / 16 章。
 - ~~记忆持久化与用户画像落地。~~ **已完成**，详见第 16 章（三层存储 + Profile 冲突人工确认 + 文件持久化）。
+- ~~摄像头感知（识别 + 测距 + 左下浮层）。~~ **已完成 v0**，详见第 19 章与 `docs/vision-design.md`。
+- ~~麦克风阵列声源测向 → 数字人注视转向。~~ **已完成**，详见第 23 章与 `docs/doa-gaze-design.md`。
+- ~~本地单卡推理调度（前台优先 / FIFO / 打断不泄漏）。~~ **已完成**，详见第 24 章与 `docs/local-inference-scheduling.md`。
 
 待做：
 - ~~TTS 换 Piper/本地音素引擎~~ 已改为 Edge 神经语音（第 18 章）；若要完全离线 + 真音素级时间戳，仍可考虑 Piper（当前是拼音粗分 + 字级时间戳）。
@@ -501,7 +505,7 @@ CI 脚本 `scripts/check_expressions.py` 会自动校验三处一致，防止漏
 - 全局时钟对齐、智能降级策略。
 - 双模型路由（简单问题走快模型 / 复杂推理走强模型），待设计。
 - RAG 知识库（PDF/XLSX ingest + 向量检索工具），**设计已完成**见第 20 章与 `docs/rag-design.md`，代码未实现。
-- 摄像头感知与注视跟随，**设计已完成**见第 19 章，等硬件接口调通后实现。
+- 摄像头的「注视跟随 / 按距离分级反应」行为层（感知与测距已落地），见 §19.5 状态机。
 - 上下文瘦身（system prompt / tools schema 精简、摘要压缩策略），量化依据见第 22 章与 `docs/token-cost.md`。
 
 
@@ -724,6 +728,26 @@ python scripts/check_tool_schemas.py
 ### 11.7 新增 WS 消息
 - 服务端 → 客户端：`{"type":"interrupted","reason":"question|interrupt|always"}`。
 
+### 11.8 打断时的资源释放（aclosing）
+
+打断不只是「停 TTS」，还必须释放 LLM 推理槽位。`run_dialog` 是三层异步生成器：
+
+```
+route(token_stream())  →  token_stream()  →  agent_stream()  →  stream_chat()
+```
+
+Python 的 `async for ... break` **不会**自动关闭被迭代的异步生成器（PEP 525）。
+漏关的后果不是「少发一句话」，而是 `stream_chat` 里 `async with _slot(...)` 的
+`finally` 永远不执行——单槽闸门 `in_use` 停在 1，之后所有提问都在排队。
+
+约定：
+- 外层用 `async with aclosing(tokens), aclosing(events)`；`async with` 退出顺序与书写
+  顺序相反，所以内层 `tokens` 写前面，保证退出时先关 router 再关 token 流；
+- `token_stream` 内部再包一层 `aclosing(agent_stream(...))`，让 `GeneratorExit`
+  一路传到 `_slot` 的 `finally`；
+- 回归用例：`scripts/check_llm_gate.py` 的 `check_break_releases_slot` /
+  `check_nested_break_releases_slot`——删掉 `aclosing` 后 `in_use` 会停在 1，用例即失败。
+
 
 ## 12. 服务装配与生命周期（lifespan / app boot）
 
@@ -866,6 +890,29 @@ async def lifespan(app: FastAPI):
 
 > **完整的选型理由、模块职责、算法细节、排障记录与验证步骤见专题文档
 > `docs/vision-design.md`** —— 目标是「照该文可复现整套视觉逻辑」。本节只列配置与结论。
+
+### 13.1d 声源测向（DOA）
+
+麦克风阵列测向，把「谁在说话」变成数字人的注视方向。完整设计（算法推导、
+采集源抽象、映射与回声抑制）见 `docs/doa-gaze-design.md`，规格第 23 章为接入摘要。
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `DOA_ENABLED` | `1` | 总开关；`0` 则完全不启动测向（不影响对话） |
+| `DOA_SOURCE` | `sweep` | `sweep` = 合成扫频信号（离线自检）；`sounddevice` = 真实阵列 |
+| `DOA_FS` | `48000` | 采样率。48k 时 70mm 基线全幅可达；16k 只到 ±63° |
+| `DOA_FRAME_MS` | `100` | 帧长（毫秒） |
+| `DOA_HOP_MS` | `50` | 帧步进（毫秒），50% 叠窗 |
+| `DOA_ACTIVE_DB` | `-30` | 能量门限（dBFS）；低于此不更新方向 |
+| `DOA_SMOOTH` | `0.5` | 时域去抖系数（0.1~0.9） |
+| `DOA_PUSH_HZ` | `5` | 下发给前端的频率上限（Hz） |
+| `DOA_TTS_FREEZE` | `1` | 自己说话时不转向，避免被 TTS 回声带得乱摆 |
+| `DOA_FOV_X` | `70` | 屏幕水平视野（度），方位角 → 横向坐标用 |
+| `DOA_FOV_Y` | `40` | 屏幕垂直视野（度），俯仰映射用 |
+
+WS 旁路消息：`{"type":"doa_azimuth","az":<度>,"active":<bool>,"status":...,"ts":<ms>}`（旁路，不占对话队列，约 5Hz）；
+前端 `frontend/src/doa.js` → `head.turnTo(x)`。另有 `GET /api/doa/snapshot` 供刷新后恢复朝向。
+
 ### 13.2 分句与语言
 | 变量 | 默认值 | 说明 |
 |---|---|---|
@@ -949,6 +996,15 @@ async def lifespan(app: FastAPI):
 - 会话污染内存：`SESSION_TTL=600`、`MAX_TURNS=6`、`ENABLE_SUMMARY=1` 三者联动。
 - 联调 echo 工具：`TOOL_MAX_PERMISSION=dangerous`，同时设 `ENABLE_TOOLS=1`。
 - 手机外网访问：`SHOW_REAL_IP=1` + cloudflared 代理（端口是 8000）。
+
+### 13.11 推理调度
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `LLM_MAX_CONCURRENCY` | `0` | `0`=自动（ollama/llamacpp 单槽、云端不限）；`-1`=强制不限；`>0`=显式上限 |
+
+本地 NPU / 单卡服务端本身只能排队，这个闸门不提高吞吐，只保证：
+用户提问（前台）永远排在记忆摘要 / 画像提炼（后台）之前。详见第 24 章。
 
 ## 14. 密钥管理与仓库协作（secrets / repo hygiene）
 
@@ -1722,13 +1778,19 @@ Edge 返回的是 **MPEG-2 Layer III / 24kHz / 48kbps / 单声道**裸流
 
 ---
 
-## 19. 摄像头感知与注视跟随（P2，设计阶段）
+## 19. 摄像头感知（P2，已实现 v0：识别 + 测距）
+
+> 完整实现细节（模块职责、排障记录、验证步骤）见 `docs/vision-design.md`。
+> 本章只保留目标、接口与行为设计，避免两份文档漂移。
 
 ### 19.1 目标
 双目摄像头检测到有人靠近时，数字人用眼睛 + 转头看向对方，距离越近反应越强烈。
 体现"有人走过来 → 注意到 → 注视 → 靠近时打招呼"的自然流程。
 
 **不在本期范围**：人脸识别、情绪识别、姿态估计。只有"是否有人 + 大致方位 + 距离"。
+
+**实现状态**：感知层 v0 已落地（采集 / 识别 / 测距 / 浮层）；
+「数字人看向人」的行为层尚未实现（见 §19.5），当前注视由声源测向驱动（第 23 章）。
 
 ### 19.2 为什么放后端处理而不是浏览器
 - 浏览器拿不到双目深度信息
@@ -1737,39 +1799,58 @@ Edge 返回的是 **MPEG-2 Layer III / 24kHz / 48kbps / 单声道**裸流
 
 ### 19.3 架构
 
+最终没有采用「外部视觉进程 + socket 订阅」，而是**进程内模块 + HTTP**：
+
 ```
-双目摄像头 ──▶ 视觉进程（Python） ── socket订阅 ──▶ backend/vision/subscriber.py
-                                                │ 坐标映射 + 平滑 + 状态机
-                                                ▼
-                                       WS 广播 presence 消息
-                                                │
-                                        前端 main.js
-                                                ▼
-                                       head.lookAt() / turnTo()
+相机 ──▶ backend/vision/pipeline.py（后台守护线程）
+           camera.py 采集 → detector.py YOLO → tracker.py 兜帧
+                                 → astra.py（结构光）/ 双目视差 → 快照
+                     │
+                     ▼
+        server.py：GET /api/vision/stream  （MJPEG，每帧只推新 frame_id）
+                   GET /api/vision/objects （JSON 快照，前端 500ms 轮询）
+                   GET /api/vision/status  （可用性 / 模式 / 深度来源）
+                     │
+                     ▼
+        frontend/src/vision.js（左下角浮层：画面 + 物体 + 距离）
 ```
 
-- 视觉进程独立于 myrobot 后端，可以单独启停、单独重启
-- 订阅协议待确认（ZeroMQ PUB/SUB / MQTT / 原生 TCP）
-- myrobot 后端做一对多广播，所有连上的浏览器都收到 presence 消息
+- 改进程内的理由：少一个进程要管，少一套协议要定；视觉本来就是「给同一个后端用的」，
+  且启动/关闭挂在同一个 FastAPI lifespan 上，异常时一起收尾。
+- MJPEG 给 `<img src>`，前端零解码；物体列表频率低、走 JSON 轮询，两者频率解耦。
+- 可选能力缺失（无权重 / 无相机 / 无 SDK）时整块自动关闭，**绝不影响对话主链路**。
 
 ### 19.4 消息契约
 
+`GET /api/vision/objects`：
+
 ```json
 {
-  "type": "presence",
-  "persons": [
-    {"id": 1, "angle_x": -0.35, "angle_y": 0.1, "distance_m": 2.4, "conf": 0.92}
-  ],
-  "ts": 1730000000.123
+  "ts": 1730000000.123,
+  "frame_id": 8123,
+  "mode": "single",
+  "depth_source": "astra",
+  "depth_available": true,
+  "objects": [
+    {
+      "id": 12, "type": "人", "type_en": "person", "confidence": 0.87,
+      "bbox": [210, 156, 390, 336],
+      "distance_m": 1.89,
+      "angle_deg": -25.4,
+      "direction": "left",
+      "position": {"x": -0.8, "y": 0.0, "z": 1.7}
+    }
+  ]
 }
 ```
 
-- `angle_x/y` 归一化 `[-1, 1]`，直接喂给 `lookAt()`
-- `distance_m` 是双目优势 —— 没有深度就无法做分级反应
-- `id` 用于跨帧跟踪，避免多人时目标乱跳
-- 空数组 = 画面没人（比不发消息更可靠）
+- `distance_m` 为 `null` = 没有可信深度（单目），前端显示「—」，不假造距离。
+- `angle_deg` 只依赖焦距与像素位置，单目也有意义；负=左，正=右。
+- `id` 来自 tracker，跨帧稳定，避免多人时目标乱跳。
+- 没有 presence WS：v0 只做展示。将来行为层如果要让多个前端同步同一个人，
+  再把快照改造成旁路 WS 广播（与 `doa_azimuth` 同级别，不占对话队列）。
 
-### 19.5 行为状态机（关键）
+### 19.5 行为状态机（关键，待实现）
 机械跟随会很假。真人被靠近时是分级反应的：
 
 | 状态 | 触发条件 | 反应 |
@@ -1785,19 +1866,22 @@ Edge 返回的是 **MPEG-2 Layer III / 24kHz / 48kbps / 单声道**裸流
 - 死区阈值（小范围不动）
 - 冷却时间（目标切换要有延迟，不能左右乱甩）
 
-### 19.6 待确认
+### 19.6 已定结论（原“待确认”项）
 
-1. **订阅协议**：ZeroMQ / MQTT / 原生 TCP 换行分隔？
-2. **连接方向**：摄像头端监听（推荐）还是 myrobot 监听？
-3. **数据字段**：方位角+距离 / 像素+深度 / 只有无人+左右？
-4. **实现优先级**：先做协议+前端跟随+鼠标模拟，还是等摄像头调通再做？
+| 原问题 | 结论 |
+|---|---|
+| 订阅协议 ZeroMQ / MQTT / TCP | 都不用了：进程内模块 + HTTP（MJPEG + JSON 轮询） |
+| 摄像头端监听还是 myrobot 监听 | 无连接方向：视觉线程在同一个后端进程里 |
+| 数据字段 | 方位角 + 距离 + 包围框 + 轨迹 id（见 19.4） |
+| 先做协议还是先接相机 | 先接相机：v0 已在真机上跑通识别 + 结构光测距 |
 
-### 19.7 开发顺序（建议）
-1. 先定消息契约（本章 19.4）
-2. 前端：新增 `presence` 消息处理 + 状态机
-3. 鼠标模拟：鼠标在画布上移动模拟人位置，验证效果
-4. 后端：订阅器 + 广播通道
-5. 视觉进程：接入真实摄像头
+### 19.7 后续增量（按价值排序）
+
+1. **先接通注视**：把 `objects[].angle_deg` 直接映射到 `head.lookAt()`（不引入状态机）
+2. **三级状态机**：idle / glance / track / engage / leave（§19.5）
+3. **距离分级反应**：依赖 `distance_m`，没有深度时降级为「只看方位」
+4. **离开延迟回落**：避免人刚走出画面头就弹回
+5. **多人选择**：按面积/置信度/距离挑一个主目标，其余忽略
 
 
 ## 20. RAG 知识库接入（P2，设计阶段）
@@ -1933,3 +2017,123 @@ OpenAI 兼容协议的最外层 envelope（`model` / `stream` / `temperature` / 
 - 上下文裁剪与摘要机制：第 16 章
 - 工具 schema 体积：第 10 章（description 越啰嗦越贵）
 - 配置阈值：第 13.6 / 13.7 节
+
+
+## 23. 声源测向与注视跟随（已实现）
+
+> 完整设计（算法推导、精度边界、采集源抽象、回声抑制三层策略）见
+> `docs/doa-gaze-design.md`。本章只保留架构决策、协议与验收。
+
+### 23.1 要解决什么
+
+视觉能回答「画面里有人在哪」，但对话场景里更直接的信号是**谁在说话**。
+目标：麦克风阵列测出说话人的水平方位，数字人转头 + 眼球跟随过去，
+形成「你一开口，它就看向你」的反应。
+
+### 23.2 关键决策
+
+| 问题 | 选择 | 理由 |
+|---|---|---|
+| 方向谁来算 | 本地纯 Python GCC-PHAT | 厂商 SDK 只给「设备级」能力，换阵列就重做；GCC-PHAT 与硬件解耦 |
+| 相关算法 | PHAT 加权（不是直接互相关） | 抑制混响与频谱包络，峰值更尖 |
+| 帧参数 | 100ms 帧 / 50% hop | 兼顾时间分辨率与稳定性；叠窗让方向不跳 |
+| 采样率 | 48k（可配） | 16k 时 70mm 基线只覆盖 ±63°，边缘会糊 |
+| 自己说话时 | 冻结转向（`DOA_TTS_FREEZE`） | TTS 回声是最强的「假声源」，会带着头乱摆 |
+| 传输 | WS 旁路消息，约 5Hz | 不占对话队列；说话中被自己打断也能实时响应 |
+
+### 23.3 链路
+
+```
+麦克风阵列 ──▶ doa/source.py（sweep 合成 / sounddevice 真机）
+                 │ 100ms 帧
+                 ▼
+            doa/gccphat.py（GCC-PHAT 时延估计）
+                 ▼
+            doa/estimator.py（方位反解 + 能量门限 + 时域平滑 + TTS 冻结）
+                 ▼
+            doa/service.py（后台线程 + 最新快照）
+                 ▼
+   server.py：GET /api/doa/snapshot  +  WS 广播 doa_azimuth（5Hz，旁路）
+                 ▼
+   frontend/src/doa.js：x = clamp(az / (FOV_X/2), -1, 1) → head.turnTo(x)
+```
+
+### 23.4 协议
+
+```json
+{"type":"doa_azimuth","az":35.0,"active":true,"status":"ok","ts":1750000000000}
+```
+
+- `az`：相对屏幕正前方的水平方位角（度，逆时针为正，-90..+90 有效）。
+- `active=false`：无有效声源 / TTS 冻结 / 未就绪；前端**保持当前姿态**，不强行回正。
+- `ts`：发送端毫秒时间戳，前端据此丢弃迟到帧。
+- 与 `interrupt` / `ping` / `profile_*` 同级：旁路消息，不进对话队列。
+
+### 23.5 验收与边界
+
+- [x] 离片：合成声源扫角，反解误差 ≤12°（实测 max 7.5°，见 `scripts/check_doa.py`）
+- [x] 离片：TTS 播放标志置位时角度冻结
+- [ ] 真机：`DOA_SOURCE=sounddevice` 接 4 麦阵列（代码路径已就绪，尚未实测）
+- [ ] 垂直俯仰（`DOA_FOV_Y` 已预留，前端暂只做水平）
+- [ ] 多说话人分离（当前指向能量加权中心）
+- [ ] `pyusb` 直采（UAC1.0 在 Windows 上 4 声道采不上时的备选）
+
+已知模糊：声源在正前/正后时左右对称，方位会二义；demo 只让数字人转前方，接受这个边界。
+
+
+## 24. 本地推理并发与调度（已实现）
+
+> 完整实测数据、方案对比与复现命令见 `docs/local-inference-scheduling.md`。
+> 本章只保留结论与代码约定。
+
+### 24.1 结论：单 NPU 没有真并发
+
+同一 FLM 实例（`qwen3.5:2b`）3 个请求同口径（`max_tokens=60`）：
+
+| 请求 | 串行 TTFT | 3 并发 TTFT | 总耗时（串行 / 并发） |
+|---|---:|---:|---:|
+| #1 | 0.622s | 3.866s | 2.952 / 6.199s |
+| #2 | 0.604s | 7.128s | 2.935 / 9.456s |
+| #3 | 0.610s | 0.602s | 2.940 / 2.936s |
+
+并发墙钟 9.46s vs 串行 8.83s，**加速比 0.93×**：三个请求拿到的是三个首尾相接的时间片。
+开两个 FLM 实例同样退化为串行（还多占 11.4GB 显存/内存）。
+
+`-q` 是 NPU 队列长度，`--preemption` 是抢占开关，**都不是并行度**。
+
+### 24.2 那闸门解决什么
+
+不提高吞吐，只把隐式排队变成可控排队：
+
+1. **公平**：按到达顺序 FIFO，避免某个连接连续抢到槽位；
+2. **分级**：用户提问（前台）永远排在记忆摘要 / 画像提炼（后台）前面。
+
+### 24.3 代码约定
+
+| 位置 | 约定 |
+|---|---|
+| `pipeline/llm_gate.py` | `PriorityGate`：单槽/多槽、`(priority, seq)` 堆排序、取消惰性跳过 |
+| `pipeline/llm_client.py` | `stream_chat / chat_once / chat_with_tools` 统一走 `_slot(priority)` |
+| `server_app/dialog.py` | 摘要/画像提炼显式传 `PRIORITY_BACKGROUND` |
+| 打断路径 | 三层生成器必须 `aclosing`（见 §11.8），否则槽位不归还 |
+
+参数：`LLM_MAX_CONCURRENCY=0` 自动（本地单槽、云端不限）；`-1` 强制不限；`>0` 显式上限。
+
+### 24.4 验证
+
+```powershell
+# 起 FLM（一次只加载一个模型）
+& "D:\Program Files\flm\flm.exe" serve qwen3.5:2b -p 52625
+
+# 串行 3 次 + 同时 3 次，打印 TTFT 与总耗时
+D:\Python\Python312\python.exe scripts\bench_flm_concurrency.py 52625 3 qwen3.5:2b
+```
+
+纯逻辑自检：`python scripts/check_llm_gate.py`（policy / serial / priority / fifo /
+cancel / exception / break）。
+
+### 24.5 未做（P1）
+
+- **混合后端实测**：FLM（NPU）+ Ollama（iGPU）同时跑，量化 TTFT 干扰（未实测，不能写成结论）
+- **后台请求可抢占**：新用户消息到达时取消正在跑的摘要（当前只做到「排队时低优先级」）
+- **多用户轮转**：kiosk 场景下按会话轮转，避免一个会话饿死其他人

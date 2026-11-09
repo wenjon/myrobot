@@ -230,9 +230,13 @@ python backend\server.py
 ## 设计文档
 
 - 需求文档（做什么、为什么、优先级）：`docs/superpowers/prd.md`
-- 设计规格（怎么实现，共 22 章）：`docs/superpowers/specs/2026-07-27-robot-head-design.md`
+- 设计规格（怎么实现，共 24 章）：`docs/superpowers/specs/2026-07-27-robot-head-design.md`
+- 本仓库不使用 `openspec/` 目录：等价的「需求 + 规格」就是上面这两份，
+  专题深挖放 `docs/*.md`，规格章节只保留摘要与指针，避免两份文档漂移。
 - 专题文档：`docs/vision-design.md`（**视觉子系统：可照此复现全部逻辑 + 排障记录**）、
-  `docs/rag-design.md`（RAG 知识库设计）、`docs/token-cost.md`（上下文 token 成本拆解）
+  `docs/doa-gaze-design.md`（声源测向 → 注视转向）、`docs/tts-voice-design.md`（音色设计）、
+  `docs/rag-design.md`（RAG 知识库设计）、`docs/token-cost.md`（上下文 token 成本拆解）、
+  `docs/local-inference-scheduling.md`（本地单卡推理并发实测与调度）
 
 常用章节速查（设计规格）：
 
@@ -249,10 +253,12 @@ python backend\server.py
 | 记忆分层 / 用户画像 / 持久化 | 16 |
 | 手机/外网访问与排障 | 17 |
 | TTS 音色与韵律（抑扬顿挫） | 18 |
-| 摄像头感知与注视跟随（设计中） | 19 |
+| 摄像头感知（识别 + 测距，已实现） | 19 |
 | RAG 知识库接入（设计中） | 20 |
 | 日志与可观测性 | 21 |
 | 上下文 token 成本 | 22 |
+| 声源测向与注视跟随（已实现） | 23 |
+| 本地推理并发与调度（已实现） | 24 |
 
 ## 目录
 - `docs/doa-gaze-design.md` — 麦克风阵列声源测向（DOA）→ 数字人注视转向

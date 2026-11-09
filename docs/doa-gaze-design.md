@@ -139,7 +139,7 @@ class AudioSource(ABC):
 - **横向**：`x = clamp(az / (FOV_x/2), -1, 1)`，`FOV_x`（如 60°，配置）。把左右分得清晰。
 - **纵向**：可选的 elevation `ele` → `y = clamp(ele / (FOV_y/2), -1, 1)`（FOV_y 如 30°）。
   demo 若阵列与脸部接近，可把 y 直接映射过去；无 elevation 时 y 走 0（对正前方）。
-- **前端驱动**：`main.js` 收到 `doa_azimuth{az_deg, active, ts}` 后，计算 `x,y` →
+- **前端驱动**：`main.js` 收到 `doa_azimuth{az, active, ts}` 后，计算 `x,y` →
   调用 `head.lookAt(x, y, holdMs≈1200)`（眼珠）+ `head.turnTo(x)` /
   `head.setPose(yaw=x*MAX_YAW, pitch=y*MAX_PITCH)`（颈/头分层）。
   `holdMs` 期间暂停随机扫视，避免「刚才明明在看说话人，又被随机扫视抢走 0.3s」。
@@ -166,10 +166,10 @@ class AudioSource(ABC):
 新增一条**服务端→前端**单向消息，频率低（约 5 Hz），不要求前端 ACK：
 
 ```json
-{"type": "doa_azimuth", "az_deg": 35.0, "active": true, "ts": 1750000000000}
+{"type": "doa_azimuth", "az": 35.0, "active": true, "ts": 1750000000000}
 ```
 
-- `az_deg`：相对屏幕前方的水平方位角（度，逆时针为正，-90..+90 认为有效范围）。
+- `az`：相对屏幕前方的水平方位角（度，逆时针为正，-90..+90 认为有效范围）。
 - `active`：本帧是否检测到有效声源；false 时前端可保留上次方向或缓慢回正。
 - `ts`：发送端时间戳（毫秒），前端据此丢弃明显迟到 / 乱序帧。
 
