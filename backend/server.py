@@ -71,6 +71,11 @@ def _vision_config() -> dict:
         VISION_MIN_DISTANCE, VISION_MAX_DISTANCE, VISION_YOLO_MODEL, VISION_YOLO_CONF,
         VISION_YOLO_DEVICE, VISION_DETECT_EVERY_N, VISION_JPEG_QUALITY,
         VISION_USE_ASTRA, VISION_ASTRA_SDK_DIR,
+        VISION_YOLO_BACKEND, VISION_YOLO_ONNX_MODEL, VISION_ONNX_PROVIDER,
+        VISION_ONNX_CACHE_DIR, VISION_ONNX_CACHE_KEY, VISION_ONNX_LOG_LEVEL,
+        VISION_ONNX_WARMUP, VISION_ONNX_INTRA_THREADS, VISION_ONNX_INTER_THREADS,
+        VISION_ONNX_ALLOW_SPINNING, VISION_YOLO_INPUT_SIZE, VISION_YOLO_NMS_IOU,
+        VISION_YOLO_MAX_DET, RYZEN_AI_INSTALLATION_PATH,
     )
     return {
         "camera": {"mode": VISION_CAMERA_MODE, "single_index": VISION_CAMERA_INDEX,
@@ -79,7 +84,21 @@ def _vision_config() -> dict:
         "stereo": {"focal_length": VISION_FOCAL_LENGTH, "baseline": VISION_BASELINE,
                    "min_distance": VISION_MIN_DISTANCE, "max_distance": VISION_MAX_DISTANCE},
         "yolo": {"model": VISION_YOLO_MODEL, "conf_threshold": VISION_YOLO_CONF,
-                 "device": VISION_YOLO_DEVICE, "detect_every_n_frames": VISION_DETECT_EVERY_N},
+                 "device": VISION_YOLO_DEVICE, "detect_every_n_frames": VISION_DETECT_EVERY_N,
+                 "backend": VISION_YOLO_BACKEND,
+                 "onnx_model": VISION_YOLO_ONNX_MODEL,
+                 "provider": VISION_ONNX_PROVIDER,
+                 "cache_dir": VISION_ONNX_CACHE_DIR,
+                 "cache_key": VISION_ONNX_CACHE_KEY,
+                 "log_level": VISION_ONNX_LOG_LEVEL,
+                 "warmup": VISION_ONNX_WARMUP,
+                 "intra_threads": VISION_ONNX_INTRA_THREADS,
+                 "inter_threads": VISION_ONNX_INTER_THREADS,
+                 "allow_spinning": VISION_ONNX_ALLOW_SPINNING,
+                 "input_size": VISION_YOLO_INPUT_SIZE,
+                 "nms_iou": VISION_YOLO_NMS_IOU,
+                 "max_det": VISION_YOLO_MAX_DET,
+                 "ryzen_ai_path": RYZEN_AI_INSTALLATION_PATH},
         "server": {"jpeg_quality": VISION_JPEG_QUALITY},
         # 结构光深度（Orbbec Astra Pro）：sdk_dir 为空则不用，退回单目方位
         "astra": {"enabled": VISION_USE_ASTRA, "sdk_dir": VISION_ASTRA_SDK_DIR},
@@ -101,7 +120,7 @@ def _start_vision() -> None:
         _emit(f"[视觉][警告] 视觉模块导入失败，已关闭视觉功能：{e}")
         return
 
-    ok, why = vision_available()
+    ok, why = vision_available(_vision_config())
     if not ok:
         _vision_status = f"unavailable: {why}"
         _emit(f"[视觉][提示] {why}；视觉浮层将显示不可用，对话不受影响。")

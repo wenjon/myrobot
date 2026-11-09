@@ -1,6 +1,6 @@
 # 视觉子系统设计（相机 → 识别 → 深度）
 
-> 状态：**已实现并实测通过**（2026-10-02）。
+> 状态：**已实现并实测通过**（2026-10-02；2026-11-09 增加 AMD NPU 后端）。
 > 代码：`backend/vision/`（889 行）+ `frontend/src/vision.js`。
 > 配套：设计规格第 2 章（选型）、第 13.1c 节（配置）、第 15 章（CI）。
 >
@@ -15,6 +15,10 @@
 深度由结构光相机提供（不是视差）。整块是**尽力而为**的：任何一环坏掉都自动降级，
 绝不牵连对话链路。
 
+推理侧优先走 **AMD Ryzen AI NPU**（ONNX Runtime + VitisAIExecutionProvider），
+失败时自动回退 PyTorch/CPU；实际选中的后端会写进 `/api/vision/status.detector`，
+前端浮层标题也会显示 `NPU / GPU / CPU`，不做“静默回退”。
+
 ```
                      ┌──────────── backend/vision/ ────────────┐
   Astra Pro          │                                          │
@@ -22,7 +26,9 @@
   │  (厂商 C API)     │             ├─▶ pipeline.py ─┬─▶ JPEG ─▶ /api/vision/stream (MJPEG)
   └ PID_0501 ─RGB────▶ camera.py ──┘   (后台线程)     │
      (UVC/OpenCV)     │      │        │               └─▶ JSON ─▶ /api/vision/objects
-                      │      └▶ detector.py (YOLO)    │
+                      │      └▶ detector.py (门面)     │
+                      │         ├ yolo_npu.py (ONNX/NPU)│
+                      │         └ ultralytics (CPU 兜底)│
                       │         tracker.py  (稳定 id)  │
                       │         stereo.py   (视差备选) │
                       └──────────────────────────────────┘
@@ -137,7 +143,7 @@ astra_stream_stop → astra_reader_destroy → astra_streamset_close → astra_t
    `close_frame` 之后即失效。`astra.py:read()` 里 `.copy()` 是必需的，不是保险。
 2. **无阻塞读会返回 `None`**。`open_frame(reader, 0, ...)` 超时 0ms，
    两次深度帧之间去读必然失败。**照实透传会让距离一帧有一帧无地闪**（实测踩过，
-   见 §5.2）。处理办法在 pipeline 层（见 3.5）。
+   见 §5.2）。处理办法在 pipeline 层（见 §3.6）。
 3. **取深度用邻域中位数，不是中心点，也不是均值**。
 
 ```python
@@ -168,11 +174,21 @@ def depth_at(depth, x, y, window=10):
 本机实测只有单目，所以新增 `mono` 兜底——否则整个视觉子系统起不来。
 判据沿用原版：`frame.shape[1] >= frame.shape[0] * 2` 才算并排帧。
 
-### 3.3 `detector.py` — YOLO 识别（90 行）
+### 3.3 `detector.py` — YOLO 后端门面
 
-- **模型**：`yolov8n.pt`，COCO 80 类。
-- **类名中文化**：模型给 `person`，界面要给「人」。内置常见类映射表，
-  未列出的**回落英文原名**（不臆造）。
+`detector.py` 现在不再直接绑死 Ultralytics，而是负责**选后端 + 统一接口**：
+
+```
+Detector.detect(frame) ─┬─ OnnxYoloDetector（yolo_npu.py，NPU/GPU）
+                        └─ UltralyticsDetector（PyTorch/CPU 兜底）
+```
+
+- **对外接口不变**：`detect(frame) -> [{bbox, type, type_en, confidence}]`。
+  `pipeline.py` 不需要知道下面跑的是哪条推理路径。
+- **`describe()`**：返回实际后端、provider、模型、编译/warmup 耗时、回退原因；
+  由 `/api/vision/status.detector` 暴露。
+- **类名中文化**：模型给 `person`，界面要给「人」。映射表抽到
+  `labels.py`，与纯 ONNX 后端共用；未列出的**回落英文原名**（不臆造）。
 - **权重路径解析 `resolve_weights()`** —— 这个函数存在的唯一理由是踩过坑：
 
   ```python
@@ -183,7 +199,48 @@ def depth_at(depth, x, y, window=10):
   而本机**连不上 GitHub**（connect timeout + 重试），结果是模型加载卡死、
   整个视觉管线永久停在 `init`、一帧都不出。所以必须先找一个本地已有的权重。
 
-### 3.4 `tracker.py` — 质心追踪（43 行，原样移植）
+### 3.4 `yolo_npu.py` — ONNX Runtime + AMD NPU（新增）
+
+**为什么不能直接给 Ultralytics 换 `device`**：Ultralytics 的 `device=` 走 PyTorch；
+AMD NPU 在 Windows 上要吃 ONNX Runtime + `VitisAIExecutionProvider`，是两条不同的路。
+
+**处理流程**：
+
+```
+BGR frame
+  → letterbox 到 640×640（灰边 114，保持宽高比）
+  → BGR→RGB、HWC→CHW、uint8→float32 /255
+  → ONNX Session（VitisAIExecutionProvider）
+  → 输出 (1, 84, 8400)：前 4 行 cx/cy/w/h，后 80 行类别分数
+  → 置信度阈值 → 分类别 NMS → 反 letterbox → 原始画面坐标
+```
+
+关键点：
+
+- ONNX 不含 Ultralytics 的 `names` 元数据，类别名按 `labels.py::COCO_NAMES`
+  的固定下标还原；顺序错了会把 bus 认成 person，而且不会报错。
+- NPU 不是“整网加速”：VitisAI 只接管它能编译的子图，检测头里的
+  `reshape/transpose/softmax/concat` 等会明确打印 `partitioned to CPU`。
+  因此不能假设没有 CPU 成本。
+- CPU 兜底线程必须收窄：默认 `intra_threads=2`、`inter_threads=1`、
+  `allow_spinning=0`。不限制时 ORT 会吃满核心并忙等，实测每帧 CPU 时间
+  从 78ms 飙到 625ms，直接抢走 LLM/TTS 的算力。
+- 首次加载要编译 NPU 子图，本机实测 **8~14 秒**（受是否有相机线程并发影响）；
+  warmup 后单帧稳定。`cache_dir/cache_key` 已接好，但本机这次运行没有生成
+  可复用缓存文件，启动时间仍按首次编译估算。后续若换量化模型可再验证缓存。
+
+**本机实测**（`bus.jpg`，640 letterbox，30 次取中位数）：
+
+| 后端 | 初始化 | 墙钟延迟 | 进程 CPU 时间/帧 | 结果 |
+|---|---:|---:|---:|---|
+| Ultralytics / CPU | ~2.4s | **28.3ms** | **218.8ms** | 3 人 + 1 公交 |
+| ONNX / VitisAI | ~8s（首次编译） | **49.4ms** | **78.1ms** | 3 人 + 1 公交（多 1 个低置信度边缘人） |
+
+结论：**墙钟延迟略慢，但 CPU 时间降到约 1/3**。这个迁移的目标是给 LLM/TTS
+让出 CPU，不是追求单帧最低延迟；每 3 帧检测一次（`VISION_DETECT_EVERY_N=3`）
+足够覆盖 30fps 画面。
+
+### 3.5 `tracker.py` — 质心追踪（43 行，原样移植）
 
 给每帧的检测框一个**稳定 id**，否则界面上的编号每帧都在跳。
 同 id 只在**同类型**之间匹配；连续 `max_misses+1` 帧没出现就回收。
@@ -192,7 +249,7 @@ def depth_at(depth, x, y, window=10):
 `type_en` 被写成中文（`"人"`），标注画面上就出现 `#3 人` 而不是 `#3 person`。
 现在建 track 时一并存 `type_en`。自检里有断言锁住。
 
-### 3.5 `pipeline.py` — 编排（313 行，后台守护线程）
+### 3.6 `pipeline.py` — 编排（313 行，后台守护线程）
 
 主循环（`run()`）：
 
@@ -228,7 +285,7 @@ elif 最近一帧还在 _DEPTH_STALE_S(0.3s) 内:
 **异常策略**：整个 `run()` 包在 try 里，任何异常只置 `status="error"` 并记 `error`，
 **绝不冒泡到 myrobot 主服务**——对话链路必须照常。
 
-### 3.6 `_depth_stats()` — 诊断字段（值得单独说）
+### 3.7 `_depth_stats()` — 诊断字段（值得单独说）
 
 事件里带一个 `depth_stats`，因为它把三种「距离是 None」的情况**区分开**了：
 
@@ -249,7 +306,7 @@ elif 最近一帧还在 _DEPTH_STALE_S(0.3s) 内:
 
 | 接口 | 返回 | 说明 |
 |---|---|---|
-| `GET /api/vision/status` | `{available, status, mode, depth_source, depth, has_frame, error}` | 前端据此决定渲染什么 |
+| `GET /api/vision/status` | `{available, status, mode, depth_source, depth, has_frame, detector, error}` | 前端据此决定渲染什么；`detector` 说明实际推理后端 |
 | `GET /api/vision/objects` | `{ts, frame_id, mode, depth_source, depth_available, depth_stats, objects[]}` | 前端 500ms 轮询 |
 | `GET /api/vision/stream` | `multipart/x-mixed-replace; boundary=frame` | MJPEG，直接给 `<img src>` |
 
@@ -265,6 +322,25 @@ elif 最近一帧还在 _DEPTH_STALE_S(0.3s) 内:
   "position": {"x": -0.8, "y": 0.0, "z": 1.7}   // 相机坐标系，米
 }
 ```
+
+`status.detector` 的实际形态（NPU 生效时）：
+
+```json
+{
+  "backend": "onnx",
+  "provider": "VitisAIExecutionProvider",
+  "providers": ["VitisAIExecutionProvider", "CPUExecutionProvider"],
+  "model": "yolov8n.onnx",
+  "input_size": 640,
+  "load_ms": 14074.6,
+  "warmup_ms": 42.8,
+  "requested": "auto",
+  "fallback_reason": null
+}
+```
+
+`providers` 里同时出现 CPU 是预期结果：NPU 只接管可编译子图，其余算子回退 CPU。
+`fallback_reason` 非空则说明当前实际跑的是 Ultralytics/CPU，不能只看 `available`。
 
 **为什么画面和物体分两个接口**：画面要流畅（每帧都推），物体列表一秒刷两次就够看。
 两者频率解耦，也省得为了列表去解析视频帧。
@@ -303,7 +379,7 @@ elif 最近一帧还在 _DEPTH_STALE_S(0.3s) 内:
 - **现象**：有时物体有距离、有时全是 `None`，随机跳。
 - **根因**：Astra 的 `read()` 是非阻塞的，两次深度帧之间返回 `None`，
   照实透传 → 那一帧所有距离都是 None。
-- **修**：复用最近一帧深度（0.3s 内），见 §3.5。
+- **修**：复用最近一帧深度（0.3s 内），见 §3.6。
 - **顺带**：这次才加上 `depth_stats`，否则根本分不清是
   「没出帧」「整帧 0」还是「取点无效」。
 
@@ -349,12 +425,40 @@ elif 最近一帧还在 _DEPTH_STALE_S(0.3s) 内:
 | `VISION_LEFT_INDEX` / `VISION_RIGHT_INDEX` | `0` / `1` | dual 模式 |
 | `VISION_WIDTH` / `VISION_HEIGHT` | `640` / `480` | RGB 采集分辨率 |
 | `VISION_FOCAL_LENGTH` / `VISION_BASELINE` | `700.0` / `0.06` | 仅视差路径用；需按相机标定 |
-| `VISION_YOLO_MODEL` | `yolov8n.pt` | 权重名 |
-| `VISION_YOLO_CONF` | `0.4` | 置信度阈值 |
-| `VISION_YOLO_DEVICE` | `cpu` | 推理设备（本机 AMD，只能 CPU） |
-| `VISION_DETECT_EVERY_N` | `3` | 每 N 帧检测一次 |
-| `VISION_MODEL_DIR` | （空） | 追加的权重搜索目录 |
+| `VISION_YOLO_MODEL` | `yolov8n.pt` | PyTorch/CPU 兜底用的权重名 |
+| `VISION_YOLO_CONF` | `0.4` | 置信度阈值（ONNX 与 Ultralytics 共用） |
+| `VISION_YOLO_DEVICE` | `cpu` | **仅 Ultralytics 后端**的 `device=`；ONNX 后端忽略 |
+| `VISION_YOLO_BACKEND` | `auto` | `auto` / `npuvitis` / `dml` / `onnx` / `ultralytics`，见下表 |
+| `VISION_YOLO_ONNX_MODEL` | `yolov8n.onnx` | ONNX 权重名或绝对路径 |
+| `VISION_ONNX_PROVIDER` | `VitisAIExecutionProvider` | ONNX Runtime provider；`dml` 模式会自动改成 DirectML |
+| `VISION_ONNX_CACHE_DIR` | `.cache/ryzenai` | VitisAI 编译缓存目录（首次启动会创建） |
+| `VISION_ONNX_CACHE_KEY` | `yolov8n_640` | 编译缓存键；换模型/输入尺寸必须换键 |
+| `VISION_ONNX_LOG_LEVEL` | `warning` | `verbose/info/warning/error/fatal`；`info` 会刷算子分区日志 |
+| `VISION_ONNX_WARMUP` | `1` | 加载后先跑一张空图，把首帧抖动挪到启动阶段 |
+| `VISION_ONNX_INTRA_THREADS` | `2` | CPU 兜底算子线程数（**不要放开**，会抢 LLM/TTS） |
+| `VISION_ONNX_INTER_THREADS` | `1` | 并行图数；视觉只有一路，保持 1 |
+| `VISION_ONNX_ALLOW_SPINNING` | `0` | 禁止 ORT 线程忙等；放开会显著抬高 CPU |
+| `VISION_YOLO_INPUT_SIZE` | `640` | 必须与 ONNX 导出时的 `imgsz` 一致 |
+| `VISION_YOLO_NMS_IOU` | `0.45` | 分类别 NMS 的 IoU 阈值 |
+| `VISION_YOLO_MAX_DET` | `300` | 单帧最多保留的检测框 |
+| `RYZEN_AI_INSTALLATION_PATH` | `C:\Program Files\RyzenAI\1.7.0` | Ryzen AI 运行时根目录，VitisAI EP 依赖 |
+| `VISION_DETECT_EVERY_N` | `3` | 每 N 帧检测一次；中间帧用 tracker 兜住 |
+| `VISION_MODEL_DIR` | （空） | 追加的权重搜索目录（`.pt` 与 `.onnx` 都查） |
 | `VISION_JPEG_QUALITY` | `70` | MJPEG 画质 |
+
+`VISION_YOLO_BACKEND` 的选择语义：
+
+| 值 | 行为 |
+|---|---|
+| `auto` | ONNX 模型存在且 provider 可用就试 ONNX；任何失败都回退 Ultralytics |
+| `npuvitis` | 强制 `VitisAIExecutionProvider`；失败仍回退，但原因写进 `fallback_reason` |
+| `dml` | 强制 `DmlExecutionProvider`（AMD GPU / DirectML） |
+| `onnx` | 按 `VISION_ONNX_PROVIDER` 指定的 provider 走 ONNX |
+| `ultralytics` | 完全不走 ONNX，直接 PyTorch/CPU |
+
+> 后端是否真的落到 NPU，不看配置，看 `/api/vision/status.detector` 的
+> `provider` / `providers` / `fallback_reason`。普通 Python 环境通常没有
+> VitisAI EP，`auto` 会显式回退到 CPU。
 
 ---
 
@@ -395,12 +499,45 @@ python -c "import hashlib;print(hashlib.sha256(open('backend/vision/weights/yolo
 ```
 
 **换更大模型**：把 `VISION_YOLO_MODEL` 改成 `yolov8s.pt` / `yolov8m.pt` 等，
-并按同样方式准备权重即可。代价是 CPU 上更慢（本机是 AMD，只能 CPU 推理），
-需要相应调大 `VISION_DETECT_EVERY_N`。小模型换成大模型时**类别集合不变**（都是 COCO 80 类），
-所以 `detector.py` 的中文映射表不用改。
+并按同样方式准备 `.pt`（CPU 兜底）与 `.onnx`（NPU）两份权重。
+NPU 路径的单帧墙钟延迟未必比 CPU 低，但 CPU 时间占用明显更小；换大模型后
+仍应调大 `VISION_DETECT_EVERY_N` 并实测。类别集合不变（都是 COCO 80 类），
+所以 `labels.py` 的中文映射表不用改。
 
 **搜索顺序**（`detector.py::resolve_weights`）：
 配置里的绝对路径 → `backend/vision/weights/<名>` → `VISION_MODEL_DIR/<名>` → 交给 ultralytics 自行下载。
+
+### 7.1b YOLOv8n ONNX 权重（NPU 路径，不入库）
+
+| 项 | 值 |
+|---|---|
+| 文件名 | `yolov8n.onnx` |
+| 模型 | YOLOv8n，COCO 80 类，opset **12**，静态输入 |
+| 大小 | 12,824,061 字节（约 12.2 MiB） |
+| SHA256 | `64B00AF280E86F13158EEAD49D5AE89FCA88D31C0E4BFA78CC264746D5A82968` |
+| 输入 | `1 × 3 × 640 × 640 float32`（RGB、0~1、NCHW） |
+| 输出 | `1 × 84 × 8400`（前 4 行 cx/cy/w/h，后 80 行类别分数） |
+| 放置位置 | `backend/vision/weights/yolov8n.onnx`（同样被 `.gitignore` 忽略） |
+
+**导出命令**（在已安装 ultralytics 的环境执行，`opset=12` 是 VitisAI 兼容性关键）：
+
+```bash
+python -c "from ultralytics import YOLO; YOLO('yolov8n.pt').export(format='onnx', opset=12, imgsz=640, dynamic=False, simplify=False)"
+# 生成 yolov8n.onnx 后移到 backend/vision/weights/
+```
+
+**校验**：
+
+```bash
+python -c "import hashlib;print(hashlib.sha256(open('backend/vision/weights/yolov8n.onnx','rb').read()).hexdigest())"
+```
+
+导出的 `imgsz` 必须与 `VISION_YOLO_INPUT_SIZE` 一致；换输入尺寸要同时改
+`VISION_ONNX_CACHE_KEY`，否则旧的 NPU 编译产物可能被错误复用。
+
+**搜索顺序**（`yolo_npu.py::_resolve_model`）：
+绝对路径 → `backend/vision/weights/<名>` → `VISION_MODEL_DIR/<名>`。
+找不到会**显式抛错**，再由 `Detector` 回退 Ultralytics，不会静默去外网下载。
 
 ### 7.2 Astra SDK（结构光深度，必须自己准备）
 
@@ -420,17 +557,30 @@ SDK 的 DLL **不进仓库**（体积大 + 许可限制）。本机使用的版�
 验证 SDK 是否可用（最纯粹的一步，不经过本项目）：直接跑 SDK 自带的
 `bin/DepthReaderPoll.exe`，能持续打印 `depth frameIndex N value ...` 就说明硬件链路通。
 
-**Python 依赖**：`opencv-python`、`numpy`、`ultralytics`（含 torch）。
-另两个必须手工准备的资源（权重、Astra SDK）见 §7.1 / §7.2。
+**Python 依赖**：
+
+| 路径 | 必需依赖 | 说明 |
+|---|---|---|
+| 公共 | `opencv-python`、`numpy` | 采集、letterbox、绘制、JPEG |
+| NPU / ONNX 路径 | `onnxruntime-vitisai`（自带 `VitisAIExecutionProvider`）、`onnx` | 只在 `.venv-ryzenai` 中安装；普通 Python 没有这个 EP |
+| CPU 兜底路径 | `ultralytics`（含 `torch`） | ONNX 失败时仍能靠它出检测框 |
+
+另两个必须手工准备的资源（`.pt` / `.onnx` 权重、Astra SDK）见 §7.1 / §7.1b / §7.2。
 
 **降级矩阵**（每一格都实测过）：
 
 | 情况 | 行为 |
 |---|---|
 | `VISION_ENABLED=0` | 完全不启动，日志一条 |
-| 缺 `cv2`/`numpy`/`ultralytics` | `vision_available()` 返回明确原因，浮层显示「视觉不可用（缺依赖）」 |
+| 缺 `cv2`/`numpy` 且无任何检测后端 | `vision_available()` 返回明确原因，浮层显示「视觉不可用（缺依赖）」 |
+| 只有 `onnxruntime`，没有 `ultralytics` | 可走 ONNX；ONNX 失败后无 CPU 兜底 → `status: "error"` |
+| 只有 `ultralytics`，没有 ONNX Runtime / VitisAI EP | `auto` 回退 PyTorch/CPU，`fallback_reason` 写明缺失的 provider |
+| 有 ONNX Runtime 但 provider 不在 `ort.get_available_providers()` | ONNX 初始化抛错 → 回退 Ultralytics；启动日志和 `describe()` 都有原因 |
+| `.onnx` 缺失或路径不对 | `_resolve_model()` 抛 `FileNotFoundError` → 回退 Ultralytics，不联网下载 |
+| ONNX 初始化成功但推理抛异常 | 该帧检测失败；`pipeline` 置 error 态，主对话链路不受影响（不会自动切换后端） |
+| `RYZEN_AI_INSTALLATION_PATH` 不存在 | VitisAI EP 加载失败 → 回退 CPU；先修环境变量或安装 Ryzen AI 运行时 |
 | 相机被占用 | 启动失败 → `status: "start-failed"`，对话不受影响 |
-| 权重缺失且无网 | 模型加载失败 → `status: "error"`（这正是 §5.1 的现象，现已靠本地权避免） |
+| `.pt` 权重缺失且无网 | Ultralytics 加载失败 → `status: "error"`（这正是 §5.1 的现象，现已靠本地权重避免） |
 | 没配 `VISION_ASTRA_SDK_DIR` | 深度退回单目方位，`depth_source: "none"` |
 | 相机被拔掉 | 循环里异常 → 置 error 态，主服务照常 |
 
@@ -442,11 +592,14 @@ SDK 的 DLL **不进仓库**（体积大 + 许可限制）。本机使用的版�
 # 1) 纯逻辑自检（不需要相机，CI 也跑这个）
 python scripts/check_vision.py
 #   覆盖：tracker id 稳定性与 type_en 保留 / 类名中文化 /
-#         权重路径解析 / 结构光方位换算 / 取深度中位数与抗野值
+#         权重路径解析（.pt 与 .onnx）/ COCO 类别顺序 /
+#         结构光方位换算 / 取深度中位数与抗野值
 
 # 2) 接口自检（服务跑起来后）
 curl -s http://127.0.0.1:8765/api/vision/status
 curl -s http://127.0.0.1:8765/api/vision/objects
+#   status.detector 应给出实际 backend / provider / fallback_reason，
+#   不能只看 "available": true 就以为 NPU 生效
 
 # 3) 画面流（MJPEG，人眼看）
 #    浏览器打开 http://127.0.0.1:8765/app/index.html  → 左下角浮层
@@ -454,6 +607,19 @@ curl -s http://127.0.0.1:8765/api/vision/objects
 # 4) 结构光深度单独验证（不经 myrobot，最纯粹的硬件自检）
 #    跑 SDK 自带示例：DepthReaderPoll.exe
 ```
+
+**NPU 启动方式**（必须用带 VitisAI EP 的环境）：
+
+```powershell
+.\scripts\run_server_npu.ps1          # 默认监听 8000，参数会透传给 server.py
+curl -s http://127.0.0.1:8000/api/vision/status
+# 期望：detector.backend="onnx"，provider="VitisAIExecutionProvider"，
+#       providers 里同时出现 CPU（部分算子仍由 CPU 兜底）
+```
+
+首次启动会有 8~14 秒的 NPU 子图编译；`warmup_ms` 只代表 warmup 这一次，
+`load_ms` 才是编译总耗时。普通 `python backend\server.py` 通常没有 VitisAI EP，
+`auto` 会回退到 `ultralytics`，这是预期行为，不是 NPU 生效。
 
 **期望值**（本机实测）：`depth_source: "astra"`，物体带真实 `distance_m` 与 `angle_deg`，
 `min_mm ≈ 440~550`，`max_mm ≈ 4500`。
@@ -468,10 +634,21 @@ curl -s http://127.0.0.1:8765/api/vision/objects
 
 1. **深度-彩色未做对齐标定**：距离取的是「RGB 框中心映射到深度图」的邻域，
    两个传感器视场角不同，边缘物体的距离会有偏差。要更准需上 SDK 的配准接口（§5.6）。
-2. **CPU 推理，隔帧检测**：`VISION_DETECT_EVERY_N=3` 是流畅度与实时性的折中，
-   快速移动物体会看到框「追」上去的滞后感。
+2. **NPU 只部分卸载，CPU 仍参与**：VitisAI 编译不了的检测头算子会回到 CPU；
+   `VISION_DETECT_EVERY_N=3` 是流畅度与实时性的折中，快速移动物体会看到框
+   「追」上去的滞后感。CPU 兜底线程必须保持 `intra=2/inter=1/spinning=0`，
+   否则会明显抢占 LLM/TTS 的算力。
 3. **追踪器是质心的**，不是 ReID：物体交叉换位可能串 id。
 4. **`position.y` 恒为 0**：只用了水平方位角，没有垂直方向的仰角定位。
 5. **MJPEG 逐帧 JPEG 编码**，带宽比 H.264 高；局域网够用，外网隧道下会吃流量。
 6. **仅本机验证过 Astra Pro**。换别的结构光相机需重写 `astra.py`（各厂商 API 不同）；
    换真双目相机则改走 `stereo.py` 视差路径，需标定 `focal_length` / `baseline`。
+7. **NPU 不等于低延迟**：本机实测 ONNX/VitisAI 墙钟 49.4ms，反而略慢于
+   Ultralytics/CPU 的 28.3ms；收益是进程 CPU 时间从 218.8ms/帧降到 78.1ms/帧。
+   迁移目标是给 LLM/TTS 让出 CPU，不是追求单帧最低延迟。
+8. **首次编译慢**：NPU 子图编译约 8~14 秒，发生在视觉管线启动阶段；
+   `cache_dir` / `cache_key` 已配置，但本机未观察到此版本生成可复用缓存，
+   因此每次冷启动仍按首次编译预估。若缓存生效，`load_ms` 会显著下降。
+9. **ONNX 后端不会热切换**：初始化失败才回退 Ultralytics；运行中某帧推理异常
+   只置 error 态，不会在帧级自动换后端。要看实际状态，查
+   `/api/vision/status.detector`。

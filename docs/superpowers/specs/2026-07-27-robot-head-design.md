@@ -855,16 +855,27 @@ async def lifespan(app: FastAPI):
 | `VISION_FOCAL_LENGTH` | `700.0` | 焦距（像素），**需按相机标定** |
 | `VISION_BASELINE` | `0.06` | 两镜头间距（米），**需按相机标定** |
 | `VISION_MIN_DISTANCE` / `VISION_MAX_DISTANCE` | `0.2` / `20.0` | 有效测距范围，超出判为无效 |
-| `VISION_YOLO_MODEL` | `yolov8n.pt` | 权重名，放 `backend/vision/weights/` |
+| `VISION_YOLO_MODEL` | `yolov8n.pt` | PyTorch/CPU 兜底权重名，放 `backend/vision/weights/` |
 | `VISION_YOLO_CONF` | `0.4` | 检测置信度阈值 |
-| `VISION_YOLO_DEVICE` | `cpu` | 推理设备 |
-| `VISION_DETECT_EVERY_N` | `3` | 每 N 帧检测一次；中间帧用追踪器兜住（CPU 上保证画面流畅的关键） |
-| `VISION_MODEL_DIR` | （空） | 追加的权重搜索目录 |
+| `VISION_YOLO_DEVICE` | `cpu` | **仅 Ultralytics 后端**的推理设备；ONNX 路径忽略 |
+| `VISION_YOLO_BACKEND` | `auto` | `auto` / `npuvitis` / `dml` / `onnx` / `ultralytics` |
+| `VISION_YOLO_ONNX_MODEL` | `yolov8n.onnx` | ONNX 权重名或绝对路径 |
+| `VISION_ONNX_PROVIDER` | `VitisAIExecutionProvider` | ONNX Runtime provider |
+| `VISION_ONNX_CACHE_DIR` / `CACHE_KEY` | `.cache/ryzenai` / `yolov8n_640` | NPU 编译缓存；换模型或输入尺寸要换 key |
+| `VISION_ONNX_LOG_LEVEL` | `warning` | 算子分区日志级别 |
+| `VISION_ONNX_WARMUP` | `1` | 加载后空跑一张图，稳定首帧 |
+| `VISION_ONNX_INTRA_THREADS` / `INTER_THREADS` / `ALLOW_SPINNING` | `2` / `1` / `0` | CPU 兜底线程限制，防止抢占 LLM/TTS |
+| `VISION_YOLO_INPUT_SIZE` | `640` | 必须与 ONNX 导出 `imgsz` 一致 |
+| `VISION_YOLO_NMS_IOU` / `MAX_DET` | `0.45` / `300` | 分类别 NMS 与单帧上限 |
+| `RYZEN_AI_INSTALLATION_PATH` | `C:\Program Files\RyzenAI\1.7.0` | VitisAI EP 运行时根目录 |
+| `VISION_DETECT_EVERY_N` | `3` | 每 N 帧检测一次；中间帧用追踪器兜住 |
+| `VISION_MODEL_DIR` | （空） | 追加的权重搜索目录（`.pt` / `.onnx` 都查） |
 | `VISION_JPEG_QUALITY` | `70` | MJPEG 画质 |
 
 三个接口：`/api/vision/stream`（MJPEG 画面）、`/api/vision/objects`（物体快照）、
-`/api/vision/status`（状态）。**深度只来自双目视差**：单目时 `distance_m` 恒为 `null`，
-前端显示「—」而不假造距离；方位角单目也有意义（只依赖焦距与像素位置）。
+`/api/vision/status`（状态，含 `detector` 实际后端）。**深度按可用性自动选**：
+结构光优先，其次双目视差；两者都没有时 `distance_m` 恒为 `null`，前端显示「—」，
+方位角仍有意义（只依赖视场角/焦距与像素位置）。
 
 **深度来源按可用性自动选**，不需要手工切换：
 

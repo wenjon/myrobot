@@ -132,9 +132,11 @@ cloudflared tunnel --url http://127.0.0.1:8000
 ## 依赖
 - **LLM**：默认阿里云百炼 Model Studio（需 `MAAS_API_KEY`，模型 `qwen3.6-flash`）；或火山引擎 Ark（`LLM_PROVIDER=ark`，需 `ARK_API_KEY`）、本地 **llama.cpp**（`LLM_PROVIDER=llamacpp`，默认 `http://127.0.0.1:8080/v1`）/ **Ollama**（`LLM_PROVIDER=ollama`），后两者均无需密钥
 - **Python 3.10+**：`pip install -r backend/requirements.txt`
-- **视觉（可选）**：`opencv-python` + `ultralytics`（含 torch）。装了才有左下角视觉浮层，
-  没装则整块自动关闭、对话不受影响。YOLO 权重放 `backend/vision/weights/yolov8n.pt`
-  （不入库；缺失时见 `backend/vision/detector.py::resolve_weights` 的解析顺序）。
+- **视觉（可选）**：`opencv-python` + `numpy`，再任选一条推理路径：
+  - NPU：`onnxruntime-vitisai` + `yolov8n.onnx`（推荐 `scripts/run_server_npu.ps1` 启动）；
+  - CPU 兜底：`ultralytics`（含 torch）+ `yolov8n.pt`。
+  两套权重都放 `backend/vision/weights/`（不入库）。缺依赖/权重时视觉整块自动降级，
+  对话不受影响。实际生效的后端看 `/api/vision/status.detector`。
 - 现代浏览器（Chrome/Edge 推荐，含 Web Speech 合成与识别）
 
 ## 运行
@@ -145,6 +147,28 @@ python backend\server.py
 # 3) 打开浏览器
 #    http://127.0.0.1:8000/app/index.html
 ```
+
+**要用 AMD NPU 跑 YOLO**，必须用带 VitisAI ExecutionProvider 的环境启动，
+普通 `python backend\server.py` 会静默回退 CPU：
+
+```powershell
+.\scripts\run_server_npu.ps1          # 默认用 .venv-ryzenai，监听 8000
+curl -s http://127.0.0.1:8000/api/vision/status
+# 看 detector.backend / provider / fallback_reason：
+#   backend=onnx + provider=VitisAIExecutionProvider  → NPU 路径生效
+#   backend=ultralytics 或 fallback_reason 非空       → 当前是 CPU 兜底
+```
+
+首次启动会花 8~14 秒编译 NPU 子图。NPU 只接管部分算子，检测头仍回落到 CPU，
+所以脚本把 ORT 兜底线程限制为 `intra=2 / inter=1 / spinning=0`，避免抢占
+LLM/TTS。本机实测（`bus.jpg`，30 次中位数）：
+
+| 后端 | 墙钟延迟 | 进程 CPU 时间/帧 |
+|---|---:|---:|
+| Ultralytics / CPU | 28.3ms | 218.8ms |
+| ONNX / VitisAI | 49.4ms | **78.1ms** |
+
+收益是 CPU 时间降到约 1/3，而不是单帧更快；详见 `docs/vision-design.md` §3.4 / §9。
 
 可用环境变量覆盖配置（见 `backend/config.py`）：
 - `LLM_PROVIDER`（`maas` 阿里云百炼（默认）/ `ark` 火山引擎 / `llamacpp` 本地 llama.cpp / `ollama` 本地 Ollama）
@@ -157,6 +181,8 @@ python backend\server.py
 - 记忆：`MEMORY_PERSIST`（默认 `1`，设 `0` 则纯内存）、`MEMORY_DATA_DIR`、`MEMORY_FLUSH_EVERY_N_TURNS`（默认 `5`）、`MEMORY_MAX_LONG_TERM_CHARS`（默认 `2000`）
 - 画像冲突：`PROFILE_CONFLICT_TIMEOUT_S`（默认 `60`，超时保旧）、`PROFILE_MAX_CONFLICTS_PER_TURN`（默认 `3`）
 - 语音输入（ASR）：`VOICE_AUTOSTART`（默认 `1`，打开页面即常开麦克风）、`VOICE_SILENCE_MS`（默认 `1200`，静音多久自动发送）、`VOICE_RESUME_DELAY_MS`（默认 `400`，播完后再等多久开麦，防回声自激）、`ASR_LANG`（默认 `zh-CN`）
+- 视觉推理：`VISION_YOLO_BACKEND`（`auto` / `npuvitis` / `dml` / `onnx` / `ultralytics`）、`VISION_YOLO_ONNX_MODEL`、`VISION_ONNX_PROVIDER`、`VISION_ONNX_INTRA_THREADS` / `INTER_THREADS` / `ALLOW_SPINNING`、`VISION_YOLO_INPUT_SIZE`、`RYZEN_AI_INSTALLATION_PATH`
+- 视觉采集：`VISION_ENABLED`、`VISION_CAMERA_MODE`、`VISION_DETECT_EVERY_N`、`VISION_ASTRA_SDK_DIR`
 
 ## 交互
 - **语音（默认）**：打开页面即开始听，说完停顿约 1.2 秒自动发送给大模型；点「🎤 语音」可暂停/恢复。
@@ -206,11 +232,13 @@ python backend\server.py
 
 | 资源 | 关键信息 | 放哪 |
 |---|---|---|
-| **YOLO 权重** | `yolov8n.pt`，6,549,796 字节，SHA256 `f59b3d83...c83b36`，适配 ultralytics `8.4.170` | `backend/vision/weights/yolov8n.pt` |
+| **YOLO 权重（NPU）** | `yolov8n.onnx`，12,824,061 字节，opset 12，输入 1×3×640×640，SHA256 `64B00AF2...A82968` | `backend/vision/weights/yolov8n.onnx` |
+| **YOLO 权重（CPU 兜底）** | `yolov8n.pt`，6,549,796 字节，SHA256 `f59b3d83...c83b36`，适配 ultralytics `8.4.170` | `backend/vision/weights/yolov8n.pt` |
 | **Astra SDK** | AstraSDK **v2.1.3**（build `94bca0f52e`，VS2015 win64），需 `astra_core.dll` + `astra.dll` | 用 `VISION_ASTRA_SDK_DIR` 指向其 `bin` 目录 |
 
-权重官方下载：`https://github.com/ultralytics/assets/releases/download/v8.4.0/yolov8n.pt`
-（若本机连不上 GitHub，用 `VISION_MODEL_DIR` 指向别处已下好的权重目录即可。）
+`.pt` 官方下载：`https://github.com/ultralytics/assets/releases/download/v8.4.0/yolov8n.pt`
+（若本机连不上 GitHub，用 `VISION_MODEL_DIR` 指向别处已下好的权重目录即可。
+`.onnx` 由本地 `.pt` 导出：`format=onnx, opset=12, imgsz=640, dynamic=False`。）
 
 完整的下载、校验（SHA256）、换更大模型、驱动安装说明见
 **`docs/vision-design.md` §7**。

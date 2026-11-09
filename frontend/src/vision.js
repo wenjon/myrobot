@@ -79,6 +79,15 @@ export function initVision() {
   const SOURCE_NAME = { astra: '结构光测距', stereo: '双目测距', none: '单目（无深度）' };
   function sourceName(src) { return SOURCE_NAME[src] || '单目（无深度）'; }
 
+  // 推理后端短名：让用户一眼看出现在到底有没有吃到 NPU，而不是只看到“视觉在跑”。
+  function detectorName(det) {
+    if (!det) return '';
+    if (det.provider === 'VitisAIExecutionProvider') return 'NPU';
+    if (det.provider === 'DmlExecutionProvider') return 'GPU';
+    if (det.backend === 'onnx') return 'ONNX';
+    return 'CPU';
+  }
+
   // ---- 物体列表 ----
   function renderObjects(list, depthOn) {
     objsEl.innerHTML = '';
@@ -135,10 +144,11 @@ export function initVision() {
       }
       const depthOn = d.depth_available === true;
       renderObjects(d.objects, depthOn);
+      const det = detectorName(d.detector);
       if (d.objects && d.objects.length) {
-        setState('live', `${sourceName(d.depth_source)} · ${d.objects.length} 个物体`);
+        setState('live', `${sourceName(d.depth_source)} · ${d.objects.length} 个物体${det ? ' · ' + det : ''}`);
       } else if (videoStarted) {
-        setState('live', sourceName(d.depth_source));
+        setState('live', `${sourceName(d.depth_source)}${det ? ' · ' + det : ''}`);
       }
     } catch {
       setState('err', '后端未连接');

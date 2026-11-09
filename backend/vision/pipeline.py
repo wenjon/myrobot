@@ -17,8 +17,11 @@ HTTP 处理器只做 read-under-lock，不与检测抢时间。
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
+
+logger = logging.getLogger(__name__)
 
 # Astra 深度帧常见分辨率（按面积反推，因为 SDK 没导出取宽高的符号）
 _DEPTH_SHAPES = {640 * 480: (480, 640), 320 * 240: (240, 320), 1280 * 960: (960, 1280)}
@@ -27,19 +30,55 @@ _DEPTH_SHAPES = {640 * 480: (480, 640), 320 * 240: (240, 320), 1280 * 960: (960,
 _DEPTH_STALE_S = 0.3
 
 
-def vision_available() -> tuple[bool, str]:
+def _find_local_model(name: str) -> str | None:
+    """按与 detector.resolve_weights 相同的顺序找本地权重，只做文件存在性检查。"""
+    import os
+    from pathlib import Path
+
+    p = Path(name)
+    if p.is_absolute() and p.is_file():
+        return str(p)
+    candidates = [Path(__file__).resolve().parent / "weights" / p.name]
+    env_dir = os.getenv("VISION_MODEL_DIR", "").strip()
+    if env_dir:
+        candidates.append(Path(env_dir) / p.name)
+    for c in candidates:
+        if c.is_file():
+            return str(c)
+    return None
+
+
+def vision_available(cfg: dict | None = None) -> tuple[bool, str]:
     """检查视觉依赖是否齐全。返回 (可用, 原因)。
 
-    只检查包在不在，不在这里加载 YOLO 权重（那会触发下载，太重）。
+    只检查包/模型文件在不在，不在这里加载 YOLO（首次 NPU 编译很重）。
+    视觉有两个可用后端：ONNX（NPU/GPU）与 Ultralytics（CPU）；只要有一条
+    能走通就允许启动，真正选了哪条由 Detector 在管线里决定并写入 status。
     """
     import importlib.util as u
 
     for mod in ("cv2", "numpy"):
         if u.find_spec(mod) is None:
             return False, f"缺少依赖 {mod}（pip install opencv-python numpy）"
-    if u.find_spec("ultralytics") is None:
-        return False, "缺少依赖 ultralytics（pip install ultralytics）"
-    return True, "ok"
+
+    yolo_cfg = (cfg or {}).get("yolo", {}) or {}
+    backend = str(yolo_cfg.get("backend", "auto")).lower()
+    onnx_path = _find_local_model(yolo_cfg.get("onnx_model", "yolov8n.onnx"))
+    have_ort = u.find_spec("onnxruntime") is not None
+    have_ultra = u.find_spec("ultralytics") is not None
+
+    if onnx_path and have_ort:
+        return True, "ok(onnx)"
+    if have_ultra:
+        return True, "ok(ultralytics)"
+
+    if backend in ("npuvitis", "vitisai", "onnx", "dml"):
+        return False, (
+            "缺少 ONNX 推理依赖或模型：需要 onnxruntime（NPU 还需 onnxruntime-vitisai）"
+            f"且 {yolo_cfg.get('onnx_model', 'yolov8n.onnx')} 存在；"
+            "也可安装 ultralytics 走 CPU 回退"
+        )
+    return False, "缺少依赖 ultralytics（pip install ultralytics）"
 
 
 class VisionPipeline(threading.Thread):
@@ -56,6 +95,7 @@ class VisionPipeline(threading.Thread):
         self.depth_source = None    # astra / stereo / none
         self.frame_id = 0
         self.error = ""
+        self._detector_info = {}    # 实际选中的 YOLO 后端/Provider，供 /api/vision/status 展示
 
         yolo_cfg = cfg.get("yolo", {})
         self._detect_every = max(1, int(yolo_cfg.get("detect_every_n_frames", 3)))
@@ -85,6 +125,7 @@ class VisionPipeline(threading.Thread):
             "frame_id": self.frame_id,
             "has_frame": has_frame,
             "error": self.error,
+            "detector": dict(self._detector_info),
         }
 
     # ---------- 深度源装配 ----------
@@ -120,6 +161,8 @@ class VisionPipeline(threading.Thread):
             self.mode = cam.mode
 
             detector = Detector(self.cfg)
+            self._detector_info = detector.describe()
+            logger.info("[视觉] 检测后端已就绪: %s", self._detector_info)
             stereo = StereoDepth(self.cfg)
             tracker = CentroidTracker()
 
@@ -216,6 +259,7 @@ class VisionPipeline(threading.Thread):
                          "mode": self.mode,
                          "depth_source": self.depth_source,
                          "depth_available": self.depth_source != "none",
+                         "detector": dict(self._detector_info),
                          "depth_stats": self._depth_stats(depth_map, disp, left.shape),
                          "objects": detections}
                 with self.lock:

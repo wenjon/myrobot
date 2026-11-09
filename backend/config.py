@@ -263,6 +263,36 @@ DOA_FOV_Y      = float(os.getenv("DOA_FOV_Y", "40"))        # 屏幕垂直视野
 # → VISION_MODEL_DIR 指向的目录 → 交给 ultralytics 自行下载（本机连不上 GitHub，
 # 所以前两条至少要命中一条，否则模型加载会一直重试）。
 VISION_YOLO_MODEL = os.getenv("VISION_YOLO_MODEL", "yolov8n.pt")
+# 检测后端：auto / ultralytics / onnx / npuvitis / dml
+#   auto       → 有 .onnx 且 ONNX Runtime 带 VitisAI 时走 NPU，否则回退 PyTorch
+#   npuvitis   → 强制 AMD NPU（失败仍会回退，但原因会显示在 /api/vision/status）
+#   dml        → ONNX Runtime DirectML（AMD GPU）
+#   ultralytics→ 保持原 PyTorch 路径
+# 注意：NPU EP 来自 onnxruntime-vitisai；若用默认全局 Python 启动，通常没有它，
+# 此时 auto 会自动回退 CPU。要用 NPU 请用 .venv-ryzenai 里的 Python 启动。
+VISION_YOLO_BACKEND = os.getenv("VISION_YOLO_BACKEND", "auto")
+# 纯 ONNX 模型；由 yolov8n.pt 导出（固定 1×3×640×640，输出 1×84×8400）
+VISION_YOLO_ONNX_MODEL = os.getenv("VISION_YOLO_ONNX_MODEL", "yolov8n.onnx")
+# ONNX Runtime ExecutionProvider：VitisAIExecutionProvider（NPU）或 DmlExecutionProvider（GPU）
+VISION_ONNX_PROVIDER = os.getenv("VISION_ONNX_PROVIDER", "VitisAIExecutionProvider")
+# VitisAI 编译缓存：首次编译约数秒~十几秒，缓存后复用可显著缩短启动
+VISION_ONNX_CACHE_DIR = os.getenv("VISION_ONNX_CACHE_DIR", ".cache/ryzenai")
+VISION_ONNX_CACHE_KEY = os.getenv("VISION_ONNX_CACHE_KEY", "yolov8n_640")
+# ONNX Runtime / EP 日志：warning 足够；info 会打印大量算子分区日志
+VISION_ONNX_LOG_LEVEL = os.getenv("VISION_ONNX_LOG_LEVEL", "warning")
+VISION_ONNX_WARMUP = os.getenv("VISION_ONNX_WARMUP", "1") == "1"
+# ONNX Runtime 的 CPU 兜底线程：限制成小数量，避免视觉抢走 LLM/TTS 的算力
+VISION_ONNX_INTRA_THREADS = int(os.getenv("VISION_ONNX_INTRA_THREADS", "2"))
+VISION_ONNX_INTER_THREADS = int(os.getenv("VISION_ONNX_INTER_THREADS", "1"))
+VISION_ONNX_ALLOW_SPINNING = os.getenv("VISION_ONNX_ALLOW_SPINNING", "0") == "1"
+# 输入尺寸 / NMS 参数（需与导出时的 imgsz 一致）
+VISION_YOLO_INPUT_SIZE = int(os.getenv("VISION_YOLO_INPUT_SIZE", "640"))
+VISION_YOLO_NMS_IOU = float(os.getenv("VISION_YOLO_NMS_IOU", "0.45"))
+VISION_YOLO_MAX_DET = int(os.getenv("VISION_YOLO_MAX_DET", "300"))
+# Ryzen AI 运行时根目录（VitisAI EP 需要）。默认按本机安装位置；换机请改 .env。
+RYZEN_AI_INSTALLATION_PATH = os.getenv(
+    "RYZEN_AI_INSTALLATION_PATH", r"C:\Program Files\RyzenAI\1.7.0"
+)
 # 额外的权重搜索目录（可选）。留空即可——把 .pt 放进 backend/vision/weights/ 最省事；
 # 想复用别处已下好的权重再设这个。
 VISION_MODEL_DIR = os.getenv("VISION_MODEL_DIR", "")

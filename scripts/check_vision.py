@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 # 这两个模块顶层不 import cv2（detector 的 ultralytics 是延迟 import），所以能进 CI
 from vision.detector import resolve_weights, to_zh  # noqa: E402
+from vision.labels import COCO_NAMES  # noqa: E402
 from vision.tracker import CentroidTracker  # noqa: E402
 
 failures = []
@@ -62,6 +63,12 @@ if id_first in tr.tracks:
 check("to_zh person", to_zh("person"), "人")
 check("to_zh car", to_zh("car"), "汽车")
 check("to_zh 未知类回落原样", to_zh("unknown-thing"), "unknown-thing")
+# 纯 ONNX 后端没有 ultralytics 的 names 元数据，必须靠 COCO_NAMES 还原。
+# 顺序错了会把 bus 识别成 person，且不会报错——这里锁住长度和关键下标。
+check("COCO 类别数", len(COCO_NAMES), 80)
+check("COCO[0] 是 person", COCO_NAMES[0], "person")
+check("COCO[5] 是 bus", COCO_NAMES[5], "bus")
+check("COCO[79] 是 toothbrush", COCO_NAMES[79], "toothbrush")
 
 # ---- 3) resolve_weights：优先本地，找不到才交回原名 ----
 check("resolve_weights 命中仓库内权重",

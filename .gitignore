@@ -3,6 +3,8 @@ __pycache__/
 *.log
 *.wav
 .venv/
+# Ryzen AI / ONNX Runtime NPU 隔离环境（本机专用，wheel 与 DLL 不入库）
+.venv-ryzenai/
 node_modules/
 backend/logs/
 # 本机记忆落盘（含用户画像等个人信息，绝不入库，详见 docs 第 16.9）
